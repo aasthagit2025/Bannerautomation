@@ -45,24 +45,26 @@ def _cell(ws, row, col, merges):
 
 
 def find_rows(ws):
-    """Locate the label row and the logic row.
+    """Locate the logic row, the label row, and any heading rows above them.
 
-    The logic row is the last row with content. The label row is the last
-    populated row above it, and the two heading rows sit above that.
+    The logic row is the last populated row; the label row is the one above
+    it. Everything populated above that is a heading tier, outermost first.
+    Banners vary in how many tiers they carry - some have a super-header and
+    a group heading, some only one heading, some none - so the count is read
+    from the sheet rather than assumed.
     """
     populated = [
         r for r in range(1, ws.max_row + 1)
         if any(ws.cell(r, c).value not in (None, "") for c in range(1, ws.max_column + 1))
     ]
-    if len(populated) < 4:
+    if len(populated) < 2:
         raise SheetError(
-            f"expected at least 4 populated rows (super, group, label, logic); "
+            f"expected at least 2 populated rows (labels and logic); "
             f"found {len(populated)}")
     logic_row = populated[-1]
     label_row = populated[-2]
-    group_row = populated[-3]
-    super_row = populated[-4]
-    return super_row, group_row, label_row, logic_row
+    tier_rows = populated[:-2]
+    return tier_rows, label_row, logic_row
 
 
 def read_points(path_or_buffer, sheet=None, default_width=DEFAULT_WIDTH,
@@ -71,9 +73,8 @@ def read_points(path_or_buffer, sheet=None, default_width=DEFAULT_WIDTH,
     wb = openpyxl.load_workbook(path_or_buffer, data_only=True)
     ws = wb[sheet] if sheet else wb[wb.sheetnames[0]]
 
-    super_row, group_row, label_row, logic_row = find_rows(ws)
-    m_super = _merge_map(ws, super_row)
-    m_group = _merge_map(ws, group_row)
+    tier_rows, label_row, logic_row = find_rows(ws)
+    merges = [_merge_map(ws, r) for r in tier_rows]
 
     width_overrides = width_overrides or {}
     points = []
@@ -83,22 +84,26 @@ def read_points(path_or_buffer, sheet=None, default_width=DEFAULT_WIDTH,
         if not label and not logic:
             continue                       # blank stub column on the left
         n = len(points) + 1
-        points.append({
-            "super": _cell(ws, super_row, col, m_super),
-            "group": _cell(ws, group_row, col, m_group),
+        point = {
             "label": label,
             "logic": " ".join(logic.split()),   # normalise internal whitespace
             "width": int(width_overrides.get(n, default_width)),
             "column": n,
-        })
+            "tiers": [_cell(ws, r, col, m)
+                      for r, m in zip(tier_rows, merges)],
+        }
+        # keep the two-tier names available for display and older callers
+        point["super"] = point["tiers"][0] if len(point["tiers"]) > 0 else ""
+        point["group"] = point["tiers"][1] if len(point["tiers"]) > 1 else ""
+        points.append(point)
 
     if not points:
         raise SheetError("no banner columns found - check the sheet layout")
 
     meta = {
         "sheet": ws.title,
-        "rows": {"super": super_row, "group": group_row,
-                 "label": label_row, "logic": logic_row},
+        "rows": {"headings": tier_rows, "label": label_row, "logic": logic_row},
+        "tiers": len(tier_rows),
         "columns": len(points),
     }
     return points, meta

@@ -53,6 +53,14 @@ with st.sidebar:
     just = st.selectbox("Text justification", ["center", "left", "right"], index=0,
                         help="WinCross defaults to left; both sample banners are centred.")
 
+    st.subheader("Open-ended ranges")
+    st.caption(
+        "Banner plans write conditions like 'S4>14'. WinCross needs both "
+        "ends of a range, so the missing bound is supplied here."
+    )
+    range_lo = st.number_input("Assumed lower bound", -9999, 9999, 0)
+    range_hi = st.number_input("Assumed upper bound", 1, 999999, 9999)
+
     st.subheader("Advanced")
     stat_test = st.text_input("Statistical testing (ST)", value="^  ,0")
     comparison = st.text_input("Comparison groups (CP)", value="0,0")
@@ -96,8 +104,9 @@ except ValueError as exc:
     st.stop()
 
 try:
-    points, meta = wx.read_points(
-        uploaded, default_width=int(default_width), width_overrides=overrides
+    banners, report, fmt = wx.read_any(
+        uploaded, default_width=int(default_width), width_overrides=overrides,
+        lo=int(range_lo), hi=int(range_hi),
     )
 except wx.SheetError as exc:
     st.error(f"Could not read the sheet: {exc}")
@@ -106,11 +115,42 @@ except Exception as exc:  # noqa: BLE001 - surface any reader failure to the use
     st.error(f"Unexpected problem reading the workbook: {exc}")
     st.stop()
 
-st.success(
-    f"Read {meta['columns']} banner columns from sheet '{meta['sheet']}' "
-    f"(headings on rows {meta['rows']['super']} and {meta['rows']['group']}, "
-    f"labels on row {meta['rows']['label']}, logic on row {meta['rows']['logic']})."
-)
+label = {"grid": "banner structure grid (one spreadsheet column per banner column)",
+         "plan": "banner plan (one spreadsheet row per banner column)"}[fmt]
+st.success(f"Detected a {label}. Found {len(banners)} banner(s).")
+
+if len(banners) > 1:
+    chosen = st.selectbox("Which banner?", list(banners))
+else:
+    chosen = list(banners)[0]
+points = banners[chosen]
+
+if report:
+    rows = [r for r in report if r["banner"] == chosen]
+    blocked = [r for r in rows if r["status"] == "blocked"]
+    assumed = [r for r in rows if r["status"] == "assumed"]
+    if blocked:
+        st.error(
+            f"{len(blocked)} column(s) could not be translated and are "
+            f"excluded from the output. See the Translation tab.")
+    if assumed:
+        st.warning(
+            f"{len(assumed)} column(s) needed a range bound to be assumed. "
+            f"Check them in the Translation tab.")
+
+skipped = [p for p in points if not p.get("logic")]
+points = [p for p in points if p.get("logic")]
+for i, p in enumerate(points, start=1):
+    p["column"] = i
+if skipped:
+    st.info(
+        f"{len(skipped)} column(s) have no usable logic and were left out: "
+        + ", ".join(repr(p["label"]) for p in skipped[:6])
+        + (" ..." if len(skipped) > 6 else "")
+    )
+if not points:
+    st.error("No columns have usable logic - nothing to generate.")
+    st.stop()
 
 settings = {
     "banner_id": int(banner_id),
@@ -149,14 +189,18 @@ if warnings:
         for msg in warnings:
             st.warning(msg)
 
-tab_file, tab_cols, tab_header = st.tabs(
-    ["Banner file", "Column map", "Header preview"]
-)
+names = ["Banner file", "Column map", "Header preview"]
+if report:
+    names.append("Translation")
+tabs = st.tabs(names)
+tab_file, tab_cols, tab_header = tabs[0], tabs[1], tabs[2]
+tab_trans = tabs[3] if report else None
 
 with tab_file:
     st.download_button(
         "Download banner file", data=text.encode("utf-8"),
-        file_name="banner.txt", mime="text/plain",
+        file_name=f"{chosen.replace(':', '').replace(' ', '_')}.txt",
+        mime="text/plain",
     )
     st.code(text, language="text")
 
@@ -186,3 +230,25 @@ with tab_header:
             "plus the spacers between them. Scroll horizontally to inspect."
         )
         st.code("\n".join(block), language="text")
+
+
+if tab_trans is not None:
+    with tab_trans:
+        st.caption(
+            "How each plan condition was turned into WinCross logic. "
+            "'blocked' rows are excluded from the generated file."
+        )
+        st.dataframe(
+            [
+                {
+                    "Col": r["column"],
+                    "Status": r["status"],
+                    "Label": r["label"],
+                    "Condition": r["condition"],
+                    "WinCross": r["expression"] or "-",
+                    "Note": r["note"],
+                }
+                for r in report if r["banner"] == chosen
+            ],
+            use_container_width=True, hide_index=True,
+        )

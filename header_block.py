@@ -85,7 +85,7 @@ def tier(points, spaces_before, key, stub, how="center"):
             piece = wrapped[r] if r < len(wrapped) else ""
             rows[r] += gap + justify(piece, width, how)
 
-    return rule.rstrip(), [r.rstrip() for r in rows]
+    return rule, rows
 
 
 def render(points, spaces_before=1, stub=1, justification=None):
@@ -99,12 +99,22 @@ def render(points, spaces_before=1, stub=1, justification=None):
     just.update(justification or {})
     lines = []
 
-    for key in ("super", "group"):
-        rule, labels = tier(points, spaces_before, key, stub, just[key])
+    # Render one tier per heading row present in the sheet, outermost first.
+    depth = max((len(p.get("tiers", [])) for p in points), default=0)
+    for idx in range(depth):
+        for p in points:
+            tiers = p.get("tiers", [])
+            p["_tier"] = tiers[idx] if idx < len(tiers) else ""
+        name = "super" if idx == 0 else "group"
+        rule, labels = tier(points, spaces_before, "_tier", stub,
+                            just.get(name, "center"))
         lines.append(rule)
         lines.extend(labels)
+    for p in points:
+        p.pop("_tier", None)
 
-    lines.append("")
+    if depth:
+        lines.append("")
 
     # Column tier: every column is its own span, so key on a unique index
     for i, p in enumerate(points):
@@ -120,7 +130,7 @@ def render(points, spaces_before=1, stub=1, justification=None):
             piece = wrapped[r] if r < len(wrapped) else ""
             how = p.get("justify", just["column"])
             row += (" " * spaces_before if idx else "") + justify(piece, p["width"], how)
-        lines.append(row.rstrip())
+        lines.append(row)
 
     for p in points:
         p.pop("_col", None)

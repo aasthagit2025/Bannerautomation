@@ -18,8 +18,13 @@ A complete banner file:
 - **Logic lines** — one per banner column, with spacing normalised
 - **Header text block** — the tiered rule lines and centred labels
 
-## Input format
+## Two input formats
 
+The tool detects which shape a workbook uses and reads it accordingly.
+
+### Grid format
+
+The banner runs left to right, one spreadsheet column per banner column.
 The reader takes the last four populated rows of the sheet:
 
 | Row | Contents |
@@ -33,7 +38,59 @@ Merged cell ranges define the header spans, so headings are read from the
 sheet rather than inferred. A line break inside a label becomes a separate
 header line. The leftmost blank column is ignored.
 
-Two real specification sheets are in `examples/`.
+Heading rows are optional and counted from the sheet, so a banner with one
+heading tier works as well as one with two.
+
+### Plan format
+
+The banner runs top to bottom, one spreadsheet row per banner column, under
+named headings:
+
+| Column | Variable | Group | Label | Response | Condition | N |
+|---|---|---|---|---|---|---|
+| 1 | Total | 1 | | Total | All respondents | 135 |
+| 2 | S0 | 2 | Geography | US | S0=1 | 75 |
+| 3 | | | | EUR | S0=2,3,4 OR 5 | 60 |
+
+Group headings come from the Label column, merged down the rows they cover.
+One sheet can hold several banners, each introduced by a title row such as
+"Banner 2: US (S0=1)"; the app lets you pick which to generate.
+
+Conditions here are written for people rather than for WinCross, so they are
+translated. See below.
+
+Real sheets in both formats are in `examples/`.
+
+## Condition translation
+
+Plan conditions are translated into WinCross expressions, and every one is
+reported with a status:
+
+| Status | Meaning |
+|---|---|
+| `ok` | translated with no assumptions |
+| `assumed` | translated, but a range bound had to be supplied |
+| `blocked` | cannot be translated; excluded from the output |
+
+Examples:
+
+| Condition | WinCross | Status |
+|---|---|---|
+| `S0=1` | `S0(1)` | ok |
+| `S8=1 OR 3` | `S8(1,3)` | ok |
+| `S0=2,3,4 OR 5` | `S0(2,3,4,5)` | ok |
+| `S4>14` | `S4(15-9999)` | assumed |
+| `S5r4>XX` | — | blocked |
+| `All respondents` | — | blocked |
+
+`blocked` is the point of it. `XX` is an unfilled placeholder: the client has
+not decided the cut point. Emitting a plausible number there would put a
+wrong column into a deliverable, so the column is left out and reported
+instead.
+
+Open-ended comparisons need both ends of a range in WinCross. The assumed
+bounds default to 0 and 9999 and are set in the sidebar; tightening them to
+the real limits of the variable is worth doing.
 
 ## Usage
 
@@ -120,8 +177,12 @@ study, that is not yet handled.
 ```
 app.py                  Streamlit interface
 cli.py                  command-line entry point
+streamlit_app.py        single-file build of the whole app, for deployment
 wincross/
-  excel_spec.py         workbook reader
+  reader.py             format detection, dispatches to the right reader
+  excel_spec.py         grid-format reader
+  plan_reader.py        plan-format reader, handles multiple banners
+  logic_translate.py    plan condition -> WinCross expression
   generator.py          directive and logic assembly
   header_block.py       header text block renderer
   width_spacing.py      width and spacing rules and validation
@@ -130,8 +191,13 @@ examples/               real specification workbooks
 
 ## Deploying
 
-Push to GitHub, then on [share.streamlit.io](https://share.streamlit.io)
-point a new app at the repository with `app.py` as the entry point.
+Push `streamlit_app.py` and `requirements.txt` to the repository root, then
+on [share.streamlit.io](https://share.streamlit.io) point a new app at it.
+`streamlit_app.py` is a self-contained build of everything in `wincross/`,
+so no other files are needed and there is no folder structure to get wrong.
+
+Rebuild it after changing anything under `wincross/`; the package version is
+the one to edit.
 Dependencies come from `requirements.txt`. No secrets or credentials are
 needed — nothing leaves the process.
 

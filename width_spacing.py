@@ -61,11 +61,12 @@ def validate(points, spaces_before, divider=""):
         w = p["width"]
         if w < 1:
             errors.append(f"col {i} ({p['label']!r}): width {w} is not valid")
-        tok = longest_token(p["label"])
-        if tok > w:
-            warnings.append(
-                f"col {i} ({p['label']!r}): longest word is {tok} chars but "
-                f"column width is {w} - label will truncate")
+        for line in label_lines(p["label"]):
+            if len(line) > w:
+                shown = line[:w]
+                warnings.append(
+                    f"col {i}: header line {line!r} is {len(line)} chars but "
+                    f"column width is {w} - will render as {shown!r}")
 
     # Widths that differ between identical labels make parallel blocks misalign
     by_label = {}

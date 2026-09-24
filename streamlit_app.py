@@ -8,6 +8,7 @@ Run locally:   streamlit run app.py
 """
 
 import io
+import re
 
 import openpyxl
 import streamlit as st
@@ -211,7 +212,7 @@ def tier(points, spaces_before, key, stub, how="center"):
             piece = wrapped[r] if r < len(wrapped) else ""
             rows[r] += gap + justify(piece, width, how)
 
-    return rule.rstrip(), [r.rstrip() for r in rows]
+    return rule, rows
 
 
 def render(points, spaces_before=1, stub=1, justification=None):
@@ -225,12 +226,22 @@ def render(points, spaces_before=1, stub=1, justification=None):
     just.update(justification or {})
     lines = []
 
-    for key in ("super", "group"):
-        rule, labels = tier(points, spaces_before, key, stub, just[key])
+    # Render one tier per heading row present in the sheet, outermost first.
+    depth = max((len(p.get("tiers", [])) for p in points), default=0)
+    for idx in range(depth):
+        for p in points:
+            tiers = p.get("tiers", [])
+            p["_tier"] = tiers[idx] if idx < len(tiers) else ""
+        name = "super" if idx == 0 else "group"
+        rule, labels = tier(points, spaces_before, "_tier", stub,
+                            just.get(name, "center"))
         lines.append(rule)
         lines.extend(labels)
+    for p in points:
+        p.pop("_tier", None)
 
-    lines.append("")
+    if depth:
+        lines.append("")
 
     # Column tier: every column is its own span, so key on a unique index
     for i, p in enumerate(points):
@@ -246,11 +257,161 @@ def render(points, spaces_before=1, stub=1, justification=None):
             piece = wrapped[r] if r < len(wrapped) else ""
             how = p.get("justify", just["column"])
             row += (" " * spaces_before if idx else "") + justify(piece, p["width"], how)
-        lines.append(row.rstrip())
+        lines.append(row)
 
     for p in points:
         p.pop("_col", None)
     return lines
+
+
+# ====================================================================
+# logic_translate.py
+# ====================================================================
+"""
+Translate banner-plan conditions into WinCross logic expressions.
+
+Banner plans are written for humans: `S0=1`, `S8=1 OR 3`, `S4>14`. WinCross
+wants `S0(1)`, `S8(1,3)`, `S4(15-9999)`. This module does that translation
+and, just as importantly, refuses to guess when it cannot.
+
+Every result carries a status:
+
+    ok        translated with no assumptions
+    assumed   translated, but a range bound had to be supplied
+    blocked   cannot be translated; needs a human
+
+`blocked` is the point of the module. A banner plan that still contains
+`S5r4>XX` has an unfilled placeholder in it, and silently emitting something
+plausible would put a wrong column into a deliverable.
+"""
+
+import re
+
+# Bounds used when a comparison is open-ended. These are assumptions and are
+# always reported as such.
+DEFAULT_MIN = 0
+DEFAULT_MAX = 9999
+
+PLACEHOLDER = re.compile(r"\b(X{2,}|\?{2,}|TBD|TBC)\b", re.I)
+
+# Text that describes a base rather than a condition
+WHOLE_SAMPLE = {"all respondents", "all", "total", "everyone", "base"}
+
+
+class Translation:
+    def __init__(self, source, expr="", status="blocked", note=""):
+        self.source = source
+        self.expr = expr
+        self.status = status
+        self.note = note
+
+    def __repr__(self):
+        return f"<{self.status}: {self.source!r} -> {self.expr!r}>"
+
+
+def _codes_from_equality(rhs):
+    """'2,3,4 OR 5' -> [2, 3, 4, 5]. Returns None if anything is not numeric."""
+    parts = re.split(r"\s*(?:,|\bOR\b|\bor\b|/)\s*", rhs)
+    codes = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        if not re.fullmatch(r"-?\d+", part):
+            return None
+        codes.append(int(part))
+    return codes or None
+
+
+def translate(condition, var_hint="", lo=DEFAULT_MIN, hi=DEFAULT_MAX):
+    """Translate one condition string into a WinCross expression."""
+    raw = "" if condition is None else str(condition).strip()
+    if not raw:
+        return Translation(raw, "", "blocked", "no condition given")
+
+    # Normalise the unicode comparison operators that come out of Word/Excel
+    text = (raw.replace("\u2264", "<=").replace("\u2265", ">=")
+               .replace("\u2260", "<>").replace("\u2212", "-")
+               .replace("\xa0", " "))
+    text = " ".join(text.split())
+
+    if text.lower() in WHOLE_SAMPLE:
+        return Translation(
+            raw, "", "blocked",
+            "describes the whole sample rather than a condition - a total "
+            "column needs its base defined explicitly")
+
+    if PLACEHOLDER.search(text):
+        return Translation(
+            raw, "", "blocked",
+            "contains an unfilled placeholder - the cut point has not been "
+            "decided yet")
+
+    # Already in WinCross form, e.g. S8r5(1) or Q1 (1) AND Q2(3)
+    if re.search(r"\w\s*\([\d,\s\-]+\)", text):
+        return Translation(raw, " ".join(text.split()), "ok",
+                           "already in WinCross syntax")
+
+    # VAR >= n / VAR > n / VAR <= n / VAR < n
+    m = re.fullmatch(r"([A-Za-z_]\w*)\s*(<=|>=|<>|<|>)\s*(-?\d+)", text)
+    if m:
+        var, op, n = m.group(1), m.group(2), int(m.group(3))
+        if op == ">":
+            return Translation(raw, f"{var}({n+1}-{hi})", "assumed",
+                               f"upper bound {hi} assumed for '{op}{n}'")
+        if op == ">=":
+            return Translation(raw, f"{var}({n}-{hi})", "assumed",
+                               f"upper bound {hi} assumed for '{op}{n}'")
+        if op == "<":
+            return Translation(raw, f"{var}({lo}-{n-1})", "assumed",
+                               f"lower bound {lo} assumed for '{op}{n}'")
+        if op == "<=":
+            return Translation(raw, f"{var}({lo}-{n})", "assumed",
+                               f"lower bound {lo} assumed for '{op}{n}'")
+        return Translation(raw, "", "blocked",
+                           f"'{op}' has no direct WinCross equivalent")
+
+    # A compound condition joins two comparisons: 'S0=1 AND S4>14'. This has
+    # to be detected before the equality rule, which would otherwise swallow
+    # the whole right-hand side. It is distinguished from a code list like
+    # 'S0=2,3,4 OR 5' by checking that every part carries its own operator.
+    parts = re.split(r"\s+(AND|OR)\s+", text, flags=re.I)
+    if len(parts) > 1:
+        operands = [p for i, p in enumerate(parts) if i % 2 == 0]
+        if all(re.search(r"[<>=]", p) for p in operands):
+            pieces, blocked, notes = [], [], []
+            for i, part in enumerate(parts):
+                if i % 2:
+                    pieces.append(part.upper())
+                    continue
+                sub = translate(part.strip(), var_hint, lo, hi)
+                if sub.status == "blocked":
+                    blocked.append(sub.note)
+                else:
+                    if sub.status == "assumed":
+                        notes.append(sub.note)
+                    pieces.append(sub.expr)
+            if blocked:
+                return Translation(raw, "", "blocked", "; ".join(blocked))
+            return Translation(raw, " ".join(pieces),
+                               "assumed" if notes else "ok", "; ".join(notes))
+
+    # VAR = codes, with commas and/or OR
+    m = re.fullmatch(r"([A-Za-z_]\w*)\s*=\s*(.+)", text)
+    if m:
+        var, rhs = m.group(1), m.group(2)
+        codes = _codes_from_equality(rhs)
+        if codes is not None:
+            body = ",".join(str(c) for c in codes)
+            return Translation(raw, f"{var}({body})", "ok")
+        return Translation(raw, "", "blocked",
+                           f"right-hand side {rhs!r} is not a list of codes")
+
+    return Translation(raw, "", "blocked", "condition syntax not recognised")
+
+
+def translate_all(conditions, lo=DEFAULT_MIN, hi=DEFAULT_MAX):
+    return [translate(c, lo=lo, hi=hi) for c in conditions]
 
 
 # ====================================================================
@@ -303,24 +464,26 @@ def _cell(ws, row, col, merges):
 
 
 def find_rows(ws):
-    """Locate the label row and the logic row.
+    """Locate the logic row, the label row, and any heading rows above them.
 
-    The logic row is the last row with content. The label row is the last
-    populated row above it, and the two heading rows sit above that.
+    The logic row is the last populated row; the label row is the one above
+    it. Everything populated above that is a heading tier, outermost first.
+    Banners vary in how many tiers they carry - some have a super-header and
+    a group heading, some only one heading, some none - so the count is read
+    from the sheet rather than assumed.
     """
     populated = [
         r for r in range(1, ws.max_row + 1)
         if any(ws.cell(r, c).value not in (None, "") for c in range(1, ws.max_column + 1))
     ]
-    if len(populated) < 4:
+    if len(populated) < 2:
         raise SheetError(
-            f"expected at least 4 populated rows (super, group, label, logic); "
+            f"expected at least 2 populated rows (labels and logic); "
             f"found {len(populated)}")
     logic_row = populated[-1]
     label_row = populated[-2]
-    group_row = populated[-3]
-    super_row = populated[-4]
-    return super_row, group_row, label_row, logic_row
+    tier_rows = populated[:-2]
+    return tier_rows, label_row, logic_row
 
 
 def read_points(path_or_buffer, sheet=None, default_width=DEFAULT_WIDTH,
@@ -329,9 +492,8 @@ def read_points(path_or_buffer, sheet=None, default_width=DEFAULT_WIDTH,
     wb = openpyxl.load_workbook(path_or_buffer, data_only=True)
     ws = wb[sheet] if sheet else wb[wb.sheetnames[0]]
 
-    super_row, group_row, label_row, logic_row = find_rows(ws)
-    m_super = _merge_map(ws, super_row)
-    m_group = _merge_map(ws, group_row)
+    tier_rows, label_row, logic_row = find_rows(ws)
+    merges = [_merge_map(ws, r) for r in tier_rows]
 
     width_overrides = width_overrides or {}
     points = []
@@ -341,22 +503,26 @@ def read_points(path_or_buffer, sheet=None, default_width=DEFAULT_WIDTH,
         if not label and not logic:
             continue                       # blank stub column on the left
         n = len(points) + 1
-        points.append({
-            "super": _cell(ws, super_row, col, m_super),
-            "group": _cell(ws, group_row, col, m_group),
+        point = {
             "label": label,
             "logic": " ".join(logic.split()),   # normalise internal whitespace
             "width": int(width_overrides.get(n, default_width)),
             "column": n,
-        })
+            "tiers": [_cell(ws, r, col, m)
+                      for r, m in zip(tier_rows, merges)],
+        }
+        # keep the two-tier names available for display and older callers
+        point["super"] = point["tiers"][0] if len(point["tiers"]) > 0 else ""
+        point["group"] = point["tiers"][1] if len(point["tiers"]) > 1 else ""
+        points.append(point)
 
     if not points:
         raise SheetError("no banner columns found - check the sheet layout")
 
     meta = {
         "sheet": ws.title,
-        "rows": {"super": super_row, "group": group_row,
-                 "label": label_row, "logic": logic_row},
+        "rows": {"headings": tier_rows, "label": label_row, "logic": logic_row},
+        "tiers": len(tier_rows),
         "columns": len(points),
     }
     return points, meta
@@ -374,6 +540,170 @@ def parse_width_overrides(text):
         col, width = chunk.split(":", 1)
         out[int(col.strip())] = int(width.strip())
     return out
+
+
+# ====================================================================
+# plan_reader.py
+# ====================================================================
+"""
+Read a banner plan laid out vertically, one row per banner column.
+
+This is the second of the two shapes seen in practice. Where the banner
+structure sheet runs horizontally with one column per banner point, a
+banner plan runs downwards under named headings:
+
+    Column | Variable | Group | Label | Response | Condition | N | ...
+      1    | Total    |   1   |       | Total    | All resp. | 135
+      2    | S0       |   2   | Geog. | US       | S0=1      |  75
+      3    |          |       |       | EUR      | S0=2,3... |  60
+
+One sheet can hold several banners, each introduced by a title row such as
+"Banner 2: US (S0=1)" followed by its own heading row. Group headings come
+from the Label column, which is merged down the rows it covers.
+
+Conditions are written in plan syntax, not WinCross syntax, so they are put
+through the translator and their status is carried on each point.
+"""
+
+import re
+
+
+DEFAULT_WIDTH = 10
+
+# Heading names, lowercased, mapped to the field they populate
+HEADINGS = {
+    "column": "column", "col": "column", "#": "column",
+    "variable": "variable", "var": "variable",
+    "group": "group_no", "grp": "group_no",
+    "label": "group", "group label": "group", "heading": "group",
+    "response": "label", "banner point": "label", "text": "label",
+    "condition": "condition", "logic": "condition", "definition": "condition",
+    "n": "n", "base": "n", "base size": "n",
+}
+
+TITLE = re.compile(r"^\s*banner\s*(\d+)?\s*[:\-]?\s*(.*)$", re.I)
+
+
+def looks_like_plan(ws):
+    """True when the sheet carries a banner-plan heading row."""
+    for r in range(1, min(ws.max_row, 40) + 1):
+        seen = {
+            str(ws.cell(r, c).value).strip().lower()
+            for c in range(1, min(ws.max_column, 15) + 1)
+            if ws.cell(r, c).value not in (None, "")
+        }
+        if {"condition", "response"} <= seen or {"condition", "label"} <= seen:
+            return True
+    return False
+
+
+def _resolved(ws, row, col):
+    """Cell value, following a merged range to its top-left anchor."""
+    for rng in ws.merged_cells.ranges:
+        if rng.min_row <= row <= rng.max_row and rng.min_col <= col <= rng.max_col:
+            v = ws.cell(rng.min_row, rng.min_col).value
+            return "" if v is None else str(v).strip()
+    v = ws.cell(row, col).value
+    return "" if v is None else str(v).strip()
+
+
+def _heading_row(ws, row):
+    """Map column index -> field name, if `row` is a heading row."""
+    mapping = {}
+    for c in range(1, ws.max_column + 1):
+        v = ws.cell(row=row, column=c).value
+        if v in (None, ""):
+            continue
+        key = str(v).strip().lower()
+        if key in HEADINGS:
+            mapping[c] = HEADINGS[key]
+    return mapping if {"condition"} <= set(mapping.values()) else None
+
+
+def read_plan(path_or_buffer, sheet=None, default_width=DEFAULT_WIDTH,
+              lo=0, hi=9999):
+    """Return {banner_name: [points]} plus a translation report."""
+    wb = openpyxl.load_workbook(path_or_buffer, data_only=True)
+    names = [sheet] if sheet else wb.sheetnames
+    banners, report = {}, []
+
+    for name in names:
+        ws = wb[name]
+        if not looks_like_plan(ws):
+            continue
+
+        current, cols, title = None, None, None
+        for r in range(1, ws.max_row + 1):
+            first = _resolved(ws, r, 1)
+
+            heading = _heading_row(ws, r)
+            if heading:
+                cols = heading
+                if current is None:
+                    title = title or f"{name}"
+                    banners.setdefault(title, [])
+                    current = title
+                continue
+
+            # A title row: text in column 1, nothing that looks like data
+            if first and not cols:
+                m = TITLE.match(first)
+                if m:
+                    title = first.strip()
+                continue
+            if first and cols and not re.fullmatch(r"\d+", first):
+                m = TITLE.match(first)
+                if m and "banner" in first.lower():
+                    title = first.strip()
+                    cols = None
+                    current = None
+                    continue
+
+            if not cols:
+                continue
+
+            row_vals = {field: _resolved(ws, r, c) for c, field in cols.items()}
+            if not row_vals.get("condition") and not row_vals.get("label"):
+                continue
+
+            if current is None:
+                title = title or name
+                banners.setdefault(title, [])
+                current = title
+
+            t = translate(row_vals.get("condition", ""), lo=lo, hi=hi)
+            n = len(banners[current]) + 1
+            point = {
+                "column": n,
+                "label": row_vals.get("label", ""),
+                "logic": t.expr,
+                "width": default_width,
+                "tiers": [row_vals.get("group", "")],
+                "super": row_vals.get("group", ""),
+                "group": "",
+                "variable": row_vals.get("variable", ""),
+                "base_n": row_vals.get("n", ""),
+                "condition": t.source,
+                "status": t.status,
+                "note": t.note,
+            }
+            banners[current].append(point)
+            report.append({
+                "banner": current, "column": n,
+                "label": point["label"], "condition": t.source,
+                "expression": t.expr, "status": t.status, "note": t.note,
+            })
+
+    if not banners:
+        raise ValueError("no banner-plan tables found in this workbook")
+    return banners, report
+
+
+def summarise(report):
+    counts = {"ok": 0, "assumed": 0, "blocked": 0}
+    for row in report:
+        counts[row["status"]] = counts.get(row["status"], 0) + 1
+    return counts
 
 
 # ====================================================================
@@ -489,6 +819,41 @@ def emit(points, settings=None):
 
 
 # ====================================================================
+# reader.py - format detection
+# ====================================================================
+def detect(path_or_buffer):
+    """Return 'plan' or 'grid'."""
+    wb = openpyxl.load_workbook(path_or_buffer, data_only=True)
+    for name in wb.sheetnames:
+        if looks_like_plan(wb[name]):
+            return "plan"
+    return "grid"
+
+
+def read_any(path_or_buffer, default_width=10, width_overrides=None,
+             lo=0, hi=9999):
+    """Read either banner format. Returns (banners, report, fmt)."""
+    fmt = detect(path_or_buffer)
+    if hasattr(path_or_buffer, "seek"):
+        path_or_buffer.seek(0)
+
+    if fmt == "plan":
+        banners, report = read_plan(path_or_buffer,
+                                    default_width=default_width, lo=lo, hi=hi)
+        if width_overrides:
+            for points in banners.values():
+                for p in points:
+                    if p["column"] in width_overrides:
+                        p["width"] = int(width_overrides[p["column"]])
+        return banners, report, fmt
+
+    points, meta = read_points(path_or_buffer, default_width=default_width,
+                               width_overrides=width_overrides)
+    return {meta.get("sheet", "Banner"): points}, [], fmt
+
+
+
+# ====================================================================
 # Streamlit interface
 # ====================================================================
 
@@ -530,6 +895,14 @@ with st.sidebar:
     stub_width = st.number_input("Left stub width", 0, 20, 1)
     just = st.selectbox("Text justification", ["center", "left", "right"], index=0,
                         help="WinCross defaults to left; both sample banners are centred.")
+
+    st.subheader("Open-ended ranges")
+    st.caption(
+        "Banner plans write conditions like 'S4>14'. WinCross needs both "
+        "ends of a range, so the missing bound is supplied here."
+    )
+    range_lo = st.number_input("Assumed lower bound", -9999, 9999, 0)
+    range_hi = st.number_input("Assumed upper bound", 1, 999999, 9999)
 
     st.subheader("Advanced")
     stat_test = st.text_input("Statistical testing (ST)", value="^  ,0")
@@ -574,8 +947,9 @@ except ValueError as exc:
     st.stop()
 
 try:
-    points, meta = read_points(
-        uploaded, default_width=int(default_width), width_overrides=overrides
+    banners, report, fmt = read_any(
+        uploaded, default_width=int(default_width), width_overrides=overrides,
+        lo=int(range_lo), hi=int(range_hi),
     )
 except SheetError as exc:
     st.error(f"Could not read the sheet: {exc}")
@@ -584,11 +958,42 @@ except Exception as exc:  # noqa: BLE001 - surface any reader failure to the use
     st.error(f"Unexpected problem reading the workbook: {exc}")
     st.stop()
 
-st.success(
-    f"Read {meta['columns']} banner columns from sheet '{meta['sheet']}' "
-    f"(headings on rows {meta['rows']['super']} and {meta['rows']['group']}, "
-    f"labels on row {meta['rows']['label']}, logic on row {meta['rows']['logic']})."
-)
+label = {"grid": "banner structure grid (one spreadsheet column per banner column)",
+         "plan": "banner plan (one spreadsheet row per banner column)"}[fmt]
+st.success(f"Detected a {label}. Found {len(banners)} banner(s).")
+
+if len(banners) > 1:
+    chosen = st.selectbox("Which banner?", list(banners))
+else:
+    chosen = list(banners)[0]
+points = banners[chosen]
+
+if report:
+    rows = [r for r in report if r["banner"] == chosen]
+    blocked = [r for r in rows if r["status"] == "blocked"]
+    assumed = [r for r in rows if r["status"] == "assumed"]
+    if blocked:
+        st.error(
+            f"{len(blocked)} column(s) could not be translated and are "
+            f"excluded from the output. See the Translation tab.")
+    if assumed:
+        st.warning(
+            f"{len(assumed)} column(s) needed a range bound to be assumed. "
+            f"Check them in the Translation tab.")
+
+skipped = [p for p in points if not p.get("logic")]
+points = [p for p in points if p.get("logic")]
+for i, p in enumerate(points, start=1):
+    p["column"] = i
+if skipped:
+    st.info(
+        f"{len(skipped)} column(s) have no usable logic and were left out: "
+        + ", ".join(repr(p["label"]) for p in skipped[:6])
+        + (" ..." if len(skipped) > 6 else "")
+    )
+if not points:
+    st.error("No columns have usable logic - nothing to generate.")
+    st.stop()
 
 settings = {
     "banner_id": int(banner_id),
@@ -627,14 +1032,18 @@ if warnings:
         for msg in warnings:
             st.warning(msg)
 
-tab_file, tab_cols, tab_header = st.tabs(
-    ["Banner file", "Column map", "Header preview"]
-)
+names = ["Banner file", "Column map", "Header preview"]
+if report:
+    names.append("Translation")
+tabs = st.tabs(names)
+tab_file, tab_cols, tab_header = tabs[0], tabs[1], tabs[2]
+tab_trans = tabs[3] if report else None
 
 with tab_file:
     st.download_button(
         "Download banner file", data=text.encode("utf-8"),
-        file_name="banner.txt", mime="text/plain",
+        file_name=f"{chosen.replace(':', '').replace(' ', '_')}.txt",
+        mime="text/plain",
     )
     st.code(text, language="text")
 
@@ -664,3 +1073,25 @@ with tab_header:
             "plus the spacers between them. Scroll horizontally to inspect."
         )
         st.code("\n".join(block), language="text")
+
+
+if tab_trans is not None:
+    with tab_trans:
+        st.caption(
+            "How each plan condition was turned into WinCross logic. "
+            "'blocked' rows are excluded from the generated file."
+        )
+        st.dataframe(
+            [
+                {
+                    "Col": r["column"],
+                    "Status": r["status"],
+                    "Label": r["label"],
+                    "Condition": r["condition"],
+                    "WinCross": r["expression"] or "-",
+                    "Note": r["note"],
+                }
+                for r in report if r["banner"] == chosen
+            ],
+            use_container_width=True, hide_index=True,
+        )
