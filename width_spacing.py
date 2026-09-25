@@ -36,13 +36,36 @@ def label_lines(label):
     return [seg.strip() for seg in parts if seg.strip()]
 
 
+def wrap_to(label, width):
+    """Split a label into header lines that fit `width`.
+
+    Explicit breaks in the label are honoured first; each resulting line is
+    then word-wrapped so nothing is cut off. A single word longer than the
+    column is left alone and reported by validate() - hyphenating it would
+    be worse than a visible warning.
+    """
+    out = []
+    for line in label_lines(label):
+        words, current = line.split(), ""
+        for word in words:
+            trial = f"{current} {word}".strip()
+            if len(trial) <= width or not current:
+                current = trial
+            else:
+                out.append(current)
+                current = word
+        if current:
+            out.append(current)
+    return out or [""]
+
+
 def longest_token(label):
     """Longest unbreakable run of characters in a label."""
     return max((len(tok) for line in label_lines(label) for tok in line.split()),
                default=0)
 
 
-def validate(points, spaces_before, divider=""):
+def validate(points, spaces_before, divider="", wrap=True):
     """Return (errors, warnings, stats). Errors block generation."""
     errors, warnings = [], []
 
@@ -61,12 +84,18 @@ def validate(points, spaces_before, divider=""):
         w = p["width"]
         if w < 1:
             errors.append(f"col {i} ({p['label']!r}): width {w} is not valid")
-        for line in label_lines(p["label"]):
-            if len(line) > w:
-                shown = line[:w]
+        if wrap:
+            tok = longest_token(p["label"])
+            if tok > w:
                 warnings.append(
-                    f"col {i}: header line {line!r} is {len(line)} chars but "
-                    f"column width is {w} - will render as {shown!r}")
+                    f"col {i}: the word {tok} characters long in {p['label']!r} "
+                    f"cannot fit a {w}-character column and will be cut")
+        else:
+            for line in label_lines(p["label"]):
+                if len(line) > w:
+                    warnings.append(
+                        f"col {i}: header line {line!r} is {len(line)} chars but "
+                        f"column width is {w} - will render as {line[:w]!r}")
 
     # Widths that differ between identical labels make parallel blocks misalign
     by_label = {}

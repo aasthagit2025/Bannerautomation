@@ -9,9 +9,83 @@ Run locally:   streamlit run app.py
 
 import io
 import re
+import zipfile
+import warnings
 
 import openpyxl
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
 import streamlit as st
+
+
+# ====================================================================
+# safe_load.py
+# ====================================================================
+"""
+Open a workbook that openpyxl would otherwise refuse.
+
+Files written by some tools carry stylesheet attributes openpyxl does not
+recognise, and loading them raises a TypeError before any data is read:
+
+    CellStyle.__init__() got an unexpected keyword argument 'applyColorFormat'
+
+The data is fine; only the styling is unusual. This retries by stripping the
+offending attributes from a copy of the file. Nothing the generator does
+depends on cell styling, so nothing is lost.
+"""
+
+import io
+import re
+import zipfile
+import warnings
+
+import openpyxl
+
+# Attributes seen in the wild that openpyxl's CellStyle does not accept
+BAD_ATTRS = re.compile(
+    r'\s(?:applyColorFormat|applyNumberFormat2|applyBorderFormat|'
+    r'applyPatternFormat)="[^"]*"'
+)
+
+
+def _sanitise(source):
+    """Return a BytesIO of the workbook with unsupported style attrs removed."""
+    if hasattr(source, "seek"):
+        source.seek(0)
+        data = source.read()
+        src = io.BytesIO(data)
+    else:
+        src = source
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(src) as zin:
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                payload = zin.read(item.filename)
+                if item.filename == "xl/styles.xml":
+                    text = payload.decode("utf-8", errors="replace")
+                    payload = BAD_ATTRS.sub("", text).encode("utf-8")
+                zout.writestr(item, payload)
+    out.seek(0)
+    return out
+
+
+def load(source, **kwargs):
+    """Load a workbook, repairing the stylesheet if openpyxl rejects it."""
+    kwargs.setdefault("data_only", True)
+    try:
+        if hasattr(source, "seek"):
+            source.seek(0)
+        return openpyxl.load_workbook(source, **kwargs)
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc):
+            raise
+    except Exception:
+        raise
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return openpyxl.load_workbook(_sanitise(source), **kwargs)
 
 
 # ====================================================================
@@ -54,13 +128,36 @@ def label_lines(label):
     return [seg.strip() for seg in parts if seg.strip()]
 
 
+def wrap_to(label, width):
+    """Split a label into header lines that fit `width`.
+
+    Explicit breaks in the label are honoured first; each resulting line is
+    then word-wrapped so nothing is cut off. A single word longer than the
+    column is left alone and reported by validate() - hyphenating it would
+    be worse than a visible warning.
+    """
+    out = []
+    for line in label_lines(label):
+        words, current = line.split(), ""
+        for word in words:
+            trial = f"{current} {word}".strip()
+            if len(trial) <= width or not current:
+                current = trial
+            else:
+                out.append(current)
+                current = word
+        if current:
+            out.append(current)
+    return out or [""]
+
+
 def longest_token(label):
     """Longest unbreakable run of characters in a label."""
     return max((len(tok) for line in label_lines(label) for tok in line.split()),
                default=0)
 
 
-def validate(points, spaces_before, divider=""):
+def validate(points, spaces_before, divider="", wrap=True):
     """Return (errors, warnings, stats). Errors block generation."""
     errors, warnings = [], []
 
@@ -79,12 +176,18 @@ def validate(points, spaces_before, divider=""):
         w = p["width"]
         if w < 1:
             errors.append(f"col {i} ({p['label']!r}): width {w} is not valid")
-        for line in label_lines(p["label"]):
-            if len(line) > w:
-                shown = line[:w]
+        if wrap:
+            tok = longest_token(p["label"])
+            if tok > w:
                 warnings.append(
-                    f"col {i}: header line {line!r} is {len(line)} chars but "
-                    f"column width is {w} - will render as {shown!r}")
+                    f"col {i}: the word {tok} characters long in {p['label']!r} "
+                    f"cannot fit a {w}-character column and will be cut")
+        else:
+            for line in label_lines(p["label"]):
+                if len(line) > w:
+                    warnings.append(
+                        f"col {i}: header line {line!r} is {len(line)} chars but "
+                        f"column width is {w} - will render as {line[:w]!r}")
 
     # Widths that differ between identical labels make parallel blocks misalign
     by_label = {}
@@ -215,7 +318,7 @@ def tier(points, spaces_before, key, stub, how="center"):
     return rule, rows
 
 
-def render(points, spaces_before=1, stub=1, justification=None):
+def render(points, spaces_before=1, stub=1, justification=None, wrap=True):
     """Build the full header block as a list of text lines.
 
     `justification` maps tier name -> "left" | "center" | "right", e.g.
@@ -249,11 +352,13 @@ def render(points, spaces_before=1, stub=1, justification=None):
     rule, _ = tier(points, spaces_before, "_col", stub)
     lines.append(rule)
 
-    depth = max(len(label_lines(p["label"])) for p in points)
+    wrapped_all = [wrap_to(p["label"], p["width"]) if wrap
+                   else label_lines(p["label"]) for p in points]
+    depth = max(len(w) for w in wrapped_all)
     for r in range(depth):
         row = " " * stub
         for idx, p in enumerate(points):
-            wrapped = label_lines(p["label"])
+            wrapped = wrapped_all[idx]
             piece = wrapped[r] if r < len(wrapped) else ""
             how = p.get("justify", just["column"])
             row += (" " * spaces_before if idx else "") + justify(piece, p["width"], how)
@@ -481,7 +586,10 @@ than inferred. The logic row is located as the last row containing data,
 which handles sheets with and without the blank spacer row.
 """
 
+import re
+
 import openpyxl
+
 
 DEFAULT_WIDTH = 10
 
@@ -508,6 +616,25 @@ def _cell(ws, row, col, merges):
     return str(value).strip()
 
 
+LOGIC_HINT = re.compile(r"[=<>]|\w\s*\([\d,\s\-]+\)|\b(AND|OR|NOT)\b", re.I)
+
+
+def looks_like_logic(ws, row, cols):
+    """True when a row carries conditions rather than labels.
+
+    A banner sheet sometimes arrives as layout only - headings and labels,
+    no conditions - and the last two populated rows are then both label
+    rows. Treating the labels as logic would emit nonsense, so the bottom
+    row is checked for the marks of a condition.
+    """
+    values = [ws.cell(row, c).value for c in cols]
+    values = [str(v).strip() for v in values if v not in (None, "")]
+    if not values:
+        return False
+    hits = sum(1 for v in values if LOGIC_HINT.search(v))
+    return hits >= max(1, len(values) // 2)
+
+
 def find_rows(ws):
     """Locate the logic row, the label row, and any heading rows above them.
 
@@ -525,6 +652,11 @@ def find_rows(ws):
         raise SheetError(
             f"expected at least 2 populated rows (labels and logic); "
             f"found {len(populated)}")
+    cols = range(1, ws.max_column + 1)
+    if not looks_like_logic(ws, populated[-1], cols):
+        # Layout only: the bottom row is labels, and there is no logic.
+        return populated[:-1], populated[-1], None
+
     logic_row = populated[-1]
     label_row = populated[-2]
     tier_rows = populated[:-2]
@@ -534,7 +666,7 @@ def find_rows(ws):
 def read_points(path_or_buffer, sheet=None, default_width=DEFAULT_WIDTH,
                 width_overrides=None):
     """Return (points, meta). Each point: super, group, label, logic, width."""
-    wb = openpyxl.load_workbook(path_or_buffer, data_only=True)
+    wb = load(path_or_buffer)
     ws = wb[sheet] if sheet else wb[wb.sheetnames[0]]
 
     tier_rows, label_row, logic_row = find_rows(ws)
@@ -544,7 +676,7 @@ def read_points(path_or_buffer, sheet=None, default_width=DEFAULT_WIDTH,
     points = []
     for col in range(1, ws.max_column + 1):
         label = _cell(ws, label_row, col, {})
-        logic = _cell(ws, logic_row, col, {})
+        logic = _cell(ws, logic_row, col, {}) if logic_row else ""
         if not label and not logic:
             continue                       # blank stub column on the left
         n = len(points) + 1
@@ -569,6 +701,7 @@ def read_points(path_or_buffer, sheet=None, default_width=DEFAULT_WIDTH,
         "rows": {"headings": tier_rows, "label": label_row, "logic": logic_row},
         "tiers": len(tier_rows),
         "columns": len(points),
+        "layout_only": logic_row is None,
     }
     return points, meta
 
@@ -613,6 +746,7 @@ through the translator and their status is carried on each point.
 import re
 
 import openpyxl
+
 
 
 DEFAULT_WIDTH = 10
@@ -670,7 +804,7 @@ def _heading_row(ws, row):
 def read_plan(path_or_buffer, sheet=None, default_width=DEFAULT_WIDTH,
               lo=0, hi=9999, placeholders=None, total_logic=""):
     """Return {banner_name: [points]} plus a translation report."""
-    wb = openpyxl.load_workbook(path_or_buffer, data_only=True)
+    wb = load(path_or_buffer)
     names = [sheet] if sheet else wb.sheetnames
     banners, report = {}, []
 
@@ -782,6 +916,7 @@ DEFAULTS = {
     "extra": "",
     "emit_header_block": True,
     "normalise_logic": True,
+    "wrap_labels": True,
 }
 
 
@@ -841,7 +976,8 @@ def emit(points, settings=None):
             p["logic"] = normalise_logic(p["logic"])
 
     spaces = int(cfg["spaces_before"])
-    errors, warnings, stats = validate(points, spaces, cfg["column_divider"])
+    errors, warnings, stats = validate(points, spaces, cfg["column_divider"],
+                                          wrap=cfg.get("wrap_labels", True))
     warnings = list(warnings) + consistency_checks(points)
     if errors:
         return "", warnings, errors, stats
@@ -867,9 +1003,201 @@ def emit(points, settings=None):
 
     if cfg["emit_header_block"]:
         lines += render(points, spaces, int(cfg["stub_width"]),
-                           cfg.get("justification"))
+                           cfg.get("justification"),
+                           wrap=cfg.get("wrap_labels", True))
 
     return "\n".join(lines) + "\n", warnings, [], stats
+
+
+# ====================================================================
+# template.py
+# ====================================================================
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+
+"""
+Turn a layout-only banner sheet into a fill-in template.
+
+Some banners arrive as layout alone: group headings and column labels, no
+conditions. There is nothing to generate from that, because the mapping
+from a label like "50-99 employees" to a code like `D1(3)` lives in the
+questionnaire, not in the banner.
+
+Rather than rejecting the file, this writes it back out with a Condition
+row added, ready to be completed and re-uploaded. It also extracts the
+variable name from each group heading - "Company size (D1)" gives `D1` -
+and offers a sequential draft, clearly marked as unverified, since code
+order frequently does not follow label order.
+"""
+
+import re
+
+
+VARIABLE = re.compile(r"\(([A-Za-z]\w*)\)\s*$")
+
+HEAD = Font(name="Arial", size=10, bold=True)
+BODY = Font(name="Arial", size=10)
+DRAFT = Font(name="Arial", size=10, italic=True, color="9C5700")
+CTR = Alignment(horizontal="center", vertical="center", wrap_text=True)
+GROUP_FILL = PatternFill("solid", fgColor="DCE6F1")
+LABEL_FILL = PatternFill("solid", fgColor="F2F2F2")
+FILLME = PatternFill("solid", fgColor="FFF2CC")
+DRAFT_FILL = PatternFill("solid", fgColor="FCE4D6")
+
+
+def variable_of(heading):
+    """'Company size (D1)' -> 'D1'. Returns '' when no variable is named."""
+    m = VARIABLE.search((heading or "").replace("\n", " ").strip())
+    return m.group(1) if m else ""
+
+
+def draft_conditions(points):
+    """Sequential code guesses per group. Unverified by construction."""
+    drafts, counters = [], {}
+    for p in points:
+        group = (p.get("tiers") or [""])[0]
+        var = variable_of(group)
+        if not var:
+            drafts.append("")
+            continue
+        counters[var] = counters.get(var, 0) + 1
+        drafts.append(f"{var}({counters[var]})")
+    return drafts
+
+
+def layout_checks(points):
+    """Problems visible from the layout alone, before any logic exists."""
+    notes = []
+
+    groups, order = {}, []
+    for p in points:
+        g = (p.get("tiers") or [""])[0].replace("\n", " ").strip()
+        if not g:
+            continue
+        if g not in groups:
+            groups[g] = []
+            order.append(g)
+        groups[g].append(p["label"].replace("\n", " ").strip())
+
+    # One variable serving two different groups is nearly always a mistake in
+    # the heading: the same variable cannot carry two different code frames.
+    by_var = {}
+    for g in order:
+        v = variable_of(g)
+        if v:
+            by_var.setdefault(v, []).append(g)
+    for var, gs in by_var.items():
+        if len(gs) > 1:
+            notes.append(
+                f"variable {var} is named by {len(gs)} different groups "
+                f"({', '.join(repr(g) for g in gs)}) - one heading is probably "
+                f"wrong, since a variable has only one code frame")
+
+    # A label that spans other labels in its own group is a net, not a code.
+    net = re.compile(r"^\s*(\d+)\s*\+|\ball\b|\bany\b|\bnet\b|/", re.I)
+    for g in order:
+        labels = groups[g]
+        for lab in labels:
+            if net.search(lab) and len(labels) > 2:
+                notes.append(
+                    f"{g!r}: {lab!r} looks like a net across several codes "
+                    f"rather than a single code - the draft will be wrong for it")
+    return notes
+
+
+def write_template(points, path, include_drafts=True):
+    """Write a workbook with the layout preserved and a Condition row added."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Banner"
+
+    drafts = draft_conditions(points) if include_drafts else [""] * len(points)
+
+    ws.cell(2, 1, "group heading").font = HEAD
+    ws.cell(3, 1, "column label").font = HEAD
+    ws.cell(4, 1, "CONDITION - fill this in").font = HEAD
+    if include_drafts:
+        ws.cell(5, 1, "draft - VERIFY before use").font = DRAFT
+
+    for i, p in enumerate(points):
+        col = 2 + i
+        group = (p.get("tiers") or [""])[0]
+
+        c = ws.cell(2, col, group)
+        c.font, c.alignment, c.fill = HEAD, CTR, GROUP_FILL
+        c = ws.cell(3, col, p["label"])
+        c.font, c.alignment, c.fill = BODY, CTR, LABEL_FILL
+        c = ws.cell(4, col, "")
+        c.font, c.alignment, c.fill = BODY, CTR, FILLME
+        if include_drafts:
+            c = ws.cell(5, col, drafts[i])
+            c.font, c.alignment, c.fill = DRAFT, CTR, DRAFT_FILL
+
+        ws.column_dimensions[c.column_letter].width = 22
+
+    ws.column_dimensions["A"].width = 26
+    for r in (2, 3, 4, 5):
+        ws.row_dimensions[r].height = 34
+
+    notes = wb.create_sheet("Read me")
+    lines = [
+        ("This banner arrived as layout only", True),
+        ("", False),
+        ("It has group headings and column labels but no conditions, so there", False),
+        ("is nothing to generate from yet. Fill in row 4 and upload this file", False),
+        ("back to the generator.", False),
+        ("", False),
+        ("Row 4 is the one to complete. Leave rows 2 and 3 as they are.", False),
+        ("", False),
+        ("Conditions can be written either way:", True),
+        ("  WinCross syntax    D1(1)   D1(1,2)   S5(3)", False),
+        ("  Plan syntax        D1=1    D1=1 OR 2  S5=3", False),
+        ("", False),
+        ("About the draft row", True),
+        ("Row 5 numbers the responses within each group in the order they", False),
+        ("appear, using the variable named in the heading. It is a starting", False),
+        ("point, not an answer: code order often does not follow label order,", False),
+        ("nets and overlapping categories never do, and a label such as", False),
+        ("'50+ employees' is usually a net across several codes rather than", False),
+        ("one of them.", False),
+        ("", False),
+        ("Check every draft against the questionnaire before copying it into", False),
+        ("row 4. Delete row 5 once you are done.", False),
+    ]
+    for i, (text, bold) in enumerate(lines, start=1):
+        notes.cell(i, 1, text).font = Font(name="Arial", size=11, bold=bold)
+    notes.column_dimensions["A"].width = 78
+
+    wb.save(path)
+    return path
+
+
+def apply_drafts(points, total_logic="TOTAL"):
+    """Fill empty logic with sequential drafts so a banner file can be built.
+
+    This produces a structurally complete WinCross file from a layout-only
+    sheet: widths, header block, directives and stat letters are all correct,
+    and only the logic lines need checking. Every drafted line is returned so
+    it can be listed for verification - the codes are positional guesses, not
+    read from the questionnaire.
+    """
+    drafts = draft_conditions(points)
+    drafted = []
+    for p, d in zip(points, drafts):
+        if p.get("logic"):
+            continue
+        group = (p.get("tiers") or [""])[0].replace("\n", " ").strip()
+        if not d:
+            p["logic"] = total_logic
+            drafted.append({"column": p["column"], "label": p["label"],
+                            "group": group, "logic": total_logic,
+                            "why": "no variable in heading - total column base used"})
+            continue
+        p["logic"] = d
+        drafted.append({"column": p["column"], "label": p["label"],
+                        "group": group, "logic": d,
+                        "why": "position within group; verify against questionnaire"})
+    return drafted
 
 
 # ====================================================================
@@ -877,7 +1205,7 @@ def emit(points, settings=None):
 # ====================================================================
 def detect(path_or_buffer):
     """Return 'plan' or 'grid'."""
-    wb = openpyxl.load_workbook(path_or_buffer, data_only=True)
+    wb = load(path_or_buffer)
     for name in wb.sheetnames:
         if looks_like_plan(wb[name]):
             return "plan"
@@ -947,6 +1275,10 @@ with st.sidebar:
 
     st.subheader("Header block")
     emit_header = st.checkbox("Generate header text block", value=True)
+    wrap_labels = st.checkbox(
+        "Wrap long labels", value=True,
+        help="Word-wrap a label across extra header lines instead of cutting "
+             "it off at the column width.")
     stub_width = st.number_input("Left stub width", 0, 20, 1)
     just = st.selectbox("Text justification", ["center", "left", "right"], index=0,
                         help="WinCross defaults to left; both sample banners are centred.")
@@ -1057,6 +1389,18 @@ if report:
             f"{len(assumed)} column(s) needed a range bound to be assumed. "
             f"Check them in the Translation tab.")
 
+layout_only = (fmt == "grid" and not any(p.get("logic") for p in points))
+drafted = []
+if layout_only:
+    st.warning(
+        "This sheet has group headings and column labels but **no conditions**. "
+        "The banner below is built with draft logic: everything except the "
+        "logic lines is correct, and each drafted line is listed for checking."
+    )
+    for note in layout_checks(points):
+        st.info(note)
+    drafted = apply_drafts(points, total_logic=total_logic or "TOTAL")
+
 skipped = [p for p in points if not p.get("logic")]
 points = [p for p in points if p.get("logic")]
 for i, p in enumerate(points, start=1):
@@ -1085,6 +1429,7 @@ settings = {
     "options": options,
     "emit_header_block": emit_header,
     "normalise_logic": normalise,
+    "wrap_labels": wrap_labels,
     "justification": {"super": just, "group": just, "column": just},
 }
 
@@ -1111,9 +1456,12 @@ if warnings:
 names = ["Banner file", "Column map", "Header preview"]
 if report:
     names.append("Translation")
+if drafted:
+    names.append("Drafted logic")
 tabs = st.tabs(names)
 tab_file, tab_cols, tab_header = tabs[0], tabs[1], tabs[2]
-tab_trans = tabs[3] if report else None
+tab_trans = tabs[names.index("Translation")] if report else None
+tab_draft = tabs[names.index("Drafted logic")] if drafted else None
 
 with tab_file:
     st.download_button(
@@ -1170,4 +1518,33 @@ if tab_trans is not None:
                 for r in report if r["banner"] == chosen
             ],
             use_container_width=True, hide_index=True,
+        )
+
+
+if tab_draft is not None:
+    with tab_draft:
+        st.error(
+            "Every line below is a positional guess, not a reading of the "
+            "questionnaire. Check each one before this banner is used. Labels "
+            "that are nets across several codes will be wrong."
+        )
+        st.dataframe(
+            [
+                {
+                    "Col": d["column"],
+                    "Group": d["group"],
+                    "Label": d["label"].replace("\n", " "),
+                    "Drafted logic": d["logic"],
+                    "Why": d["why"],
+                }
+                for d in drafted
+            ],
+            use_container_width=True, hide_index=True,
+        )
+        buf = io.BytesIO()
+        write_template(points, buf)
+        st.download_button(
+            "Download fill-in spreadsheet instead", data=buf.getvalue(),
+            file_name="banner_template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
