@@ -294,6 +294,29 @@ DEFAULT_MAX = 9999
 
 PLACEHOLDER = re.compile(r"\b(X{2,}|\?{2,}|TBD|TBC)\b", re.I)
 
+
+def resolve_placeholders(text, values):
+    """Substitute decided cut points into a condition.
+
+    `values` maps a variable name to its cut point, e.g. {"S5r4": 10}. A
+    condition like 'S5r4>XX' becomes 'S5r4>10'. Matching is on the variable
+    at the start of the condition, so the same placeholder can take a
+    different value for each variable - which is the usual case, since the
+    mitral and tricuspid thresholds are set independently.
+
+    A key of "*" supplies a fallback for any variable not named.
+    """
+    if not values or not PLACEHOLDER.search(text):
+        return text
+    m = re.match(r"\s*([A-Za-z_]\w*)", text)
+    if not m:
+        return text
+    var = m.group(1)
+    for key in (var, var.lower(), var.upper(), "*"):
+        if key in values and values[key] not in (None, ""):
+            return PLACEHOLDER.sub(str(values[key]), text)
+    return text
+
 # Text that describes a base rather than a condition
 WHOLE_SAMPLE = {"all respondents", "all", "total", "everyone", "base"}
 
@@ -323,7 +346,8 @@ def _codes_from_equality(rhs):
     return codes or None
 
 
-def translate(condition, var_hint="", lo=DEFAULT_MIN, hi=DEFAULT_MAX):
+def translate(condition, var_hint="", lo=DEFAULT_MIN, hi=DEFAULT_MAX,
+              placeholders=None):
     """Translate one condition string into a WinCross expression."""
     raw = "" if condition is None else str(condition).strip()
     if not raw:
@@ -335,6 +359,10 @@ def translate(condition, var_hint="", lo=DEFAULT_MIN, hi=DEFAULT_MAX):
                .replace("\xa0", " "))
     text = " ".join(text.split())
 
+    resolved = resolve_placeholders(text, placeholders or {})
+    substituted = resolved != text
+    text = resolved
+
     if text.lower() in WHOLE_SAMPLE:
         return Translation(
             raw, "", "blocked",
@@ -344,8 +372,8 @@ def translate(condition, var_hint="", lo=DEFAULT_MIN, hi=DEFAULT_MAX):
     if PLACEHOLDER.search(text):
         return Translation(
             raw, "", "blocked",
-            "contains an unfilled placeholder - the cut point has not been "
-            "decided yet")
+            "contains an unfilled placeholder - supply the cut point for this "
+            "variable to generate this column")
 
     # Already in WinCross form, e.g. S8r5(1) or Q1 (1) AND Q2(3)
     if re.search(r"\w\s*\([\d,\s\-]+\)", text):
@@ -356,18 +384,19 @@ def translate(condition, var_hint="", lo=DEFAULT_MIN, hi=DEFAULT_MAX):
     m = re.fullmatch(r"([A-Za-z_]\w*)\s*(<=|>=|<>|<|>)\s*(-?\d+)", text)
     if m:
         var, op, n = m.group(1), m.group(2), int(m.group(3))
+        pre = "cut point supplied; " if substituted else ""
         if op == ">":
             return Translation(raw, f"{var}({n+1}-{hi})", "assumed",
-                               f"upper bound {hi} assumed for '{op}{n}'")
+                               f"{pre}upper bound {hi} assumed for '{op}{n}'")
         if op == ">=":
             return Translation(raw, f"{var}({n}-{hi})", "assumed",
-                               f"upper bound {hi} assumed for '{op}{n}'")
+                               f"{pre}upper bound {hi} assumed for '{op}{n}'")
         if op == "<":
             return Translation(raw, f"{var}({lo}-{n-1})", "assumed",
-                               f"lower bound {lo} assumed for '{op}{n}'")
+                               f"{pre}lower bound {lo} assumed for '{op}{n}'")
         if op == "<=":
             return Translation(raw, f"{var}({lo}-{n})", "assumed",
-                               f"lower bound {lo} assumed for '{op}{n}'")
+                               f"{pre}lower bound {lo} assumed for '{op}{n}'")
         return Translation(raw, "", "blocked",
                            f"'{op}' has no direct WinCross equivalent")
 
@@ -384,7 +413,7 @@ def translate(condition, var_hint="", lo=DEFAULT_MIN, hi=DEFAULT_MAX):
                 if i % 2:
                     pieces.append(part.upper())
                     continue
-                sub = translate(part.strip(), var_hint, lo, hi)
+                sub = translate(part.strip(), var_hint, lo, hi, placeholders)
                 if sub.status == "blocked":
                     blocked.append(sub.note)
                 else:
@@ -410,8 +439,24 @@ def translate(condition, var_hint="", lo=DEFAULT_MIN, hi=DEFAULT_MAX):
     return Translation(raw, "", "blocked", "condition syntax not recognised")
 
 
-def translate_all(conditions, lo=DEFAULT_MIN, hi=DEFAULT_MAX):
-    return [translate(c, lo=lo, hi=hi) for c in conditions]
+def translate_all(conditions, lo=DEFAULT_MIN, hi=DEFAULT_MAX, placeholders=None):
+    return [translate(c, lo=lo, hi=hi, placeholders=placeholders)
+            for c in conditions]
+
+
+def parse_placeholders(text):
+    """Parse 'S5r4:10, S5r6:5' into {'S5r4': 10, 'S5r6': 5}."""
+    out = {}
+    for chunk in (text or "").replace(";", ",").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if ":" not in chunk and "=" not in chunk:
+            raise ValueError(f"expected 'variable:value', got {chunk!r}")
+        sep = ":" if ":" in chunk else "="
+        var, val = chunk.split(sep, 1)
+        out[var.strip()] = val.strip()
+    return out
 
 
 # ====================================================================
@@ -567,6 +612,8 @@ through the translator and their status is carried on each point.
 
 import re
 
+import openpyxl
+
 
 DEFAULT_WIDTH = 10
 
@@ -621,7 +668,7 @@ def _heading_row(ws, row):
 
 
 def read_plan(path_or_buffer, sheet=None, default_width=DEFAULT_WIDTH,
-              lo=0, hi=9999):
+              lo=0, hi=9999, placeholders=None, total_logic=""):
     """Return {banner_name: [points]} plus a translation report."""
     wb = openpyxl.load_workbook(path_or_buffer, data_only=True)
     names = [sheet] if sheet else wb.sheetnames
@@ -671,7 +718,14 @@ def read_plan(path_or_buffer, sheet=None, default_width=DEFAULT_WIDTH,
                 banners.setdefault(title, [])
                 current = title
 
-            t = translate(row_vals.get("condition", ""), lo=lo, hi=hi)
+            t = translate(row_vals.get("condition", ""), lo=lo, hi=hi,
+                          placeholders=placeholders)
+            # A total column is described rather than conditioned. If the house
+            # convention for it has been given, use that.
+            if t.status == "blocked" and total_logic and \
+                    str(row_vals.get("condition", "")).strip().lower() in WHOLE_SAMPLE:
+                t = Translation(t.source, total_logic, "assumed",
+                                "total column base supplied")
             n = len(banners[current]) + 1
             point = {
                 "column": n,
@@ -831,15 +885,16 @@ def detect(path_or_buffer):
 
 
 def read_any(path_or_buffer, default_width=10, width_overrides=None,
-             lo=0, hi=9999):
+             lo=0, hi=9999, placeholders=None, total_logic=""):
     """Read either banner format. Returns (banners, report, fmt)."""
     fmt = detect(path_or_buffer)
     if hasattr(path_or_buffer, "seek"):
         path_or_buffer.seek(0)
 
     if fmt == "plan":
-        banners, report = read_plan(path_or_buffer,
-                                    default_width=default_width, lo=lo, hi=hi)
+        banners, report = read_plan(path_or_buffer, default_width=default_width,
+                                    lo=lo, hi=hi, placeholders=placeholders,
+                                    total_logic=total_logic)
         if width_overrides:
             for points in banners.values():
                 for p in points:
@@ -904,6 +959,20 @@ with st.sidebar:
     range_lo = st.number_input("Assumed lower bound", -9999, 9999, 0)
     range_hi = st.number_input("Assumed upper bound", 1, 999999, 9999)
 
+    st.subheader("Cut points")
+    st.caption(
+        "Plans often ship with the threshold undecided, written as XX "
+        "(e.g. 'S5r4>XX'). Supply it here and those columns generate."
+    )
+    cutpoints = st.text_input(
+        "Placeholder values", value="",
+        help="variable:value pairs, e.g. S5r4:10, S5r6:5. Use * for a fallback.",
+    )
+    total_logic = st.text_input(
+        "Total column logic", value="",
+        help="What a column described as 'All respondents' should use.",
+    )
+
     st.subheader("Advanced")
     stat_test = st.text_input("Statistical testing (ST)", value="^  ,0")
     comparison = st.text_input("Comparison groups (CP)", value="0,0")
@@ -947,9 +1016,16 @@ except ValueError as exc:
     st.stop()
 
 try:
+    cuts = parse_placeholders(cutpoints)
+except ValueError as exc:
+    st.error(f"Could not read cut points: {exc}")
+    st.stop()
+
+try:
     banners, report, fmt = read_any(
         uploaded, default_width=int(default_width), width_overrides=overrides,
         lo=int(range_lo), hi=int(range_hi),
+        placeholders=cuts, total_logic=total_logic,
     )
 except SheetError as exc:
     st.error(f"Could not read the sheet: {exc}")
