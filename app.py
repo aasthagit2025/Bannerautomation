@@ -1878,11 +1878,14 @@ header label sits one column left of the data it describes - and the numbers
 underneath stay correct, so nothing looks broken.
 """
 
+BUILD = "2026-10-05 / build 7 / profiles + checks tab"
+
 st.title("WinCross Banner Generator")
 st.caption(
     "Turn a banner specification into a WinCross banner file: directives, "
     "logic lines and the header text block."
 )
+st.caption(f"Version: {BUILD}")
 
 # -------------------------------------------------------- client and input
 sel, spec_col, book_col = st.columns([1.1, 1, 1])
