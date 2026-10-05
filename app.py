@@ -1,8 +1,9 @@
 """
 WinCross Banner Generator - Streamlit app.
 
-Upload a banner specification workbook, review the validation output,
-and download a WinCross banner file.
+Upload a banner specification, pick the client, download a WinCross banner
+file. Everything the tool wants to tell you about the spec is collected in
+one Checks tab rather than stacked above the output.
 
 Run locally:   streamlit run app.py
 """
@@ -1833,37 +1834,106 @@ def read_any(path_or_buffer, default_width=10, width_overrides=None,
 st.set_page_config(page_title="WinCross Banner Generator",
                    page_icon="|", layout="wide")
 
+# Messages raised while reading and preparing the spec. They are collected
+# rather than printed as they occur, so the page stays readable and
+# everything needing attention sits in one place.
+CHECKS = []
+LEVELS = {"ok": "success", "warn": "warning", "error": "error"}
+
+
+def note(level, text):
+    CHECKS.append((level, text))
+
+
+LAYOUTS = """
+The tool works out which shape a workbook uses. Four are handled.
+
+**Grid** - the banner runs left to right, one spreadsheet column per banner
+column: heading rows above the labels, a row of WinCross logic beneath.
+Column A must be empty.
+
+**Plan** - one spreadsheet row per banner column, under headings named
+Column, Variable, Group, Label, Response, Condition. Several banners can
+share one sheet.
+
+**Vertical** - the same, running downwards, but with no heading row. Group
+names either sit in their own column or on a row of their own above the
+columns they cover.
+
+**Layout only** - headings and labels but no conditions. Nothing can be
+generated from this alone: upload a codebook alongside it, or fill in the
+conditions first.
+
+---
+
+**Codebook.** When a spec gives value labels but no variable names or codes,
+upload an SPSS `.sav` or a sheet of `Variable | Value | Label`. Each group of
+columns is matched as a set against every variable, and the variable whose
+value labels fit the whole group is used. Matching a group together is what
+makes it reliable - "Yes" on its own matches dozens of variables.
+
+**Total column.** Spec sheets list the analytical columns only; the total is
+added by the job. If it is added without a label reserved for it, every
+header label sits one column left of the data it describes - and the numbers
+underneath stay correct, so nothing looks broken.
+"""
+
 st.title("WinCross Banner Generator")
 st.caption(
-    "Turn a banner specification sheet into a WinCross banner file: "
-    "directives, logic lines and the header text block."
+    "Turn a banner specification into a WinCross banner file: directives, "
+    "logic lines and the header text block."
 )
 
-# ---------------------------------------------------------------- sidebar
-with st.sidebar:
-    st.header("Project")
+# -------------------------------------------------------- client and input
+sel, spec_col, book_col = st.columns([1.1, 1, 1])
+
+with sel:
     profile_name = st.selectbox(
-        "Client", list(PROFILES),
+        "Client / project", list(PROFILES),
         index=list(PROFILES).index(DEFAULT_PROFILE),
-        help="Each client has its own banner conventions. Picking the client "
-             "sets the total column, widths and directives.",
     )
     profile = get_profile(profile_name)
-    st.caption(profile["description"])
 
-    st.header("Banner settings")
+with spec_col:
+    uploaded = st.file_uploader(
+        "Banner specification (.xlsx)", type=["xlsx", "xlsm"]
+    )
+
+with book_col:
+    codebook_file = st.file_uploader(
+        "Codebook, optional (.sav / .xlsx)", type=["sav", "xlsx", "xlsm"]
+    )
+
+st.caption(profile["description"])
+
+# ------------------------------------------------------------- settings
+with st.sidebar:
+    st.header("Settings")
+    st.caption(f"Defaults come from **{profile_name}**. Change anything here.")
 
     banner_id = st.number_input("Banner ID", min_value=1, value=1, step=1)
     banner_title = st.text_input("Banner title (BT)", value="")
     banner_filter = st.text_input("Filter logic (BF)", value="")
 
-    st.subheader("Width and spacing")
-    st.caption(
-        "WinCross requires the same 'spaces before' on every column. "
-        "The maximum is 5. Default column width is 10."
+    st.subheader("Total column")
+    add_total = st.checkbox(
+        "Prepend a total column", value=bool(profile.get("prepend_total")),
+        help="Adds the total as column 1 with a label reserved for it, so "
+             "the header stays aligned with the data.",
     )
-    spaces_before = st.slider(
-        "Spaces before each column", 1, 5, int(profile.get("spaces_before", 1)))
+    total_label = st.text_input("Total column label",
+                                value=profile.get("total_label", "Total"))
+    total_logic = st.text_input(
+        "Total column logic", value=profile.get("total_logic", "TN"),
+        help="WinCross uses TN. Also used for any column a plan describes "
+             "as 'All respondents'.",
+    )
+
+    st.subheader("Width and spacing")
+    st.caption("WinCross requires the same 'spaces before' on every column, "
+               "maximum 5. Default column width is 10.")
+    spaces_before = st.slider("Spaces before each column", 1, 5,
+                              int(profile.get("spaces_before", 1)))
     default_width = st.number_input(
         "Default column width", 1, 80, int(profile.get("default_width", 10)))
     width_text = st.text_input(
@@ -1874,43 +1944,30 @@ with st.sidebar:
     )
     divider = st.text_input(
         "Column divider character(s)", value="", max_chars=5,
-        help="Plain-text reports only. Cannot exceed 'spaces before each column'.",
+        help="Plain-text reports only. Cannot exceed 'spaces before'.",
     )
 
     st.subheader("Header block")
     emit_header = st.checkbox("Generate header text block", value=True)
     wrap_labels = st.checkbox(
-        "Wrap long labels", value=True,
-        help="Word-wrap a label across extra header lines instead of cutting "
-             "it off at the column width.")
-    stub_width = st.number_input("Left stub width", 0, 20, 1)
-    just = st.selectbox("Text justification", ["center", "left", "right"], index=0,
-                        help="WinCross defaults to left; both sample banners are centred.")
-
-    st.subheader("Open-ended ranges")
-    st.caption(
-        "Banner plans write conditions like 'S4>14'. WinCross needs both "
-        "ends of a range, so the missing bound is supplied here."
+        "Wrap long labels", value=bool(profile.get("wrap_labels", True)),
+        help="Word-wrap across extra header lines instead of cutting a label "
+             "off at the column width.",
     )
+    stub_width = st.number_input("Left stub width", 0, 20, 1)
+    just = st.selectbox("Text justification", ["center", "left", "right"], 0)
+
+    st.subheader("Conditions")
+    st.caption("Plans write conditions like 'S4>14'. WinCross needs both ends "
+               "of a range, so the open end is supplied here.")
     range_lo = st.number_input("Assumed lower bound", -9999, 9999, 0)
     range_hi = st.number_input("Assumed upper bound", 1, 999999, 9999)
-
-    st.subheader("Cut points")
-    st.caption(
-        "Plans often ship with the threshold undecided, written as XX "
-        "(e.g. 'S5r4>XX'). Supply it here and those columns generate."
-    )
     cutpoints = st.text_input(
-        "Placeholder values", value="",
-        help="variable:value pairs, e.g. S5r4:10, S5r6:5. Use * for a fallback.",
-    )
-    total_logic = st.text_input(
-        "Total column logic", value=profile.get("total_logic", "TN"),
-        help="WinCross uses TN for a total column. Used for the prepended "
-             "total and for any column described as 'All respondents'.",
+        "Cut points", value="",
+        help="For placeholders like 'S5r4>XX'. Pairs: S5r4:10, S5r6:5",
     )
 
-    st.subheader("Advanced")
+    st.subheader("Directives")
     stat_test = st.text_input("Statistical testing (ST)",
                               value=profile.get("stat_test", "^  ,0"))
     comparison = st.text_input("Comparison groups (CP)",
@@ -1923,51 +1980,18 @@ with st.sidebar:
     normalise = st.checkbox("Normalise logic spacing", value=True)
 
 
-# ------------------------------------------------------------------ input
-col_a, col_b = st.columns(2)
-with col_a:
-    uploaded = st.file_uploader(
-        "Banner specification (.xlsx)", type=["xlsx", "xlsm"]
-    )
-with col_b:
-    codebook_file = st.file_uploader(
-        "Codebook, optional (.sav or .xlsx)", type=["sav", "xlsx", "xlsm"],
-        help="Needed when the spec gives value labels but no variable names "
-             "or codes. An SPSS file, or a sheet of Variable | Value | Label.",
-    )
-
-with st.expander("Expected sheet layout"):
-    st.markdown(
-        """
-The reader finds the last four populated rows and treats them as:
-
-| Row | Contents |
-|---|---|
-| super-header | merged across the columns it spans |
-| group heading | merged across the columns it spans |
-| column label | one per column |
-| banner logic | one per column, in WinCross syntax |
-
-Merged cell ranges define the header spans, so headings are read from the
-sheet rather than guessed. Line breaks inside a label become separate
-header lines. The leftmost blank column is ignored.
-        """
-    )
-
 if not uploaded:
-    st.info("Upload a specification workbook to begin.")
+    st.info("Upload a banner specification to begin.")
+    with st.expander("Which layouts are supported?", expanded=True):
+        st.markdown(LAYOUTS)
     st.stop()
 
+# --------------------------------------------------------------- read spec
 try:
     overrides = parse_width_overrides(width_text)
-except ValueError as exc:
-    st.error(f"Could not read width overrides: {exc}")
-    st.stop()
-
-try:
     cuts = parse_placeholders(cutpoints)
 except ValueError as exc:
-    st.error(f"Could not read cut points: {exc}")
+    st.error(f"Could not read a setting: {exc}")
     st.stop()
 
 try:
@@ -1976,92 +2000,86 @@ try:
         lo=int(range_lo), hi=int(range_hi),
         placeholders=cuts, total_logic=total_logic,
     )
-except SheetError as exc:
-    st.error(f"Could not read the sheet: {exc}")
-    st.stop()
-except Exception as exc:  # noqa: BLE001 - surface any reader failure to the user
-    st.error(f"Unexpected problem reading the workbook: {exc}")
+except Exception as exc:  # noqa: BLE001
+    st.error(f"Could not read the workbook: {exc}")
     st.stop()
 
-label = {"grid": "banner structure grid (one spreadsheet column per banner column)",
-         "plan": "banner plan (one spreadsheet row per banner column)"}[fmt]
-st.success(f"Detected a {label}. Found {len(banners)} banner(s).")
+shape = {
+    "grid": "grid - one spreadsheet column per banner column",
+    "plan": "plan - one row per banner column, with headings",
+    "vertical": "vertical - one row per banner column, no headings",
+}[fmt]
+note("ok", f"Detected a **{shape}** layout. {len(banners)} banner(s) found.")
 
-if len(banners) > 1:
-    chosen = st.selectbox("Which banner?", list(banners))
-else:
-    chosen = list(banners)[0]
+chosen = (st.selectbox("Which banner?", list(banners))
+          if len(banners) > 1 else list(banners)[0])
 points = banners[chosen]
+
+# --------------------------------------------------- codebook and drafting
+book, cb_report = {}, []
+if codebook_file is not None:
+    try:
+        book = load_codebook(codebook_file, codebook_file.name)
+        info = codebook_summary(book)
+        note("ok", f"Codebook read: {info['variables']} variables, "
+                   f"{info['codes']} codes.")
+    except Exception as exc:  # noqa: BLE001
+        note("error", f"Could not read the codebook: {exc}")
 
 if report:
     rows = [r for r in report if r["banner"] == chosen]
     blocked = [r for r in rows if r["status"] == "blocked"]
     assumed = [r for r in rows if r["status"] == "assumed"]
     if blocked:
-        st.error(
-            f"{len(blocked)} column(s) could not be translated and are "
-            f"excluded from the output. See the Translation tab.")
+        note("error", f"{len(blocked)} condition(s) could not be translated "
+                      f"and are excluded. See the Translation tab.")
     if assumed:
-        st.warning(
-            f"{len(assumed)} column(s) needed a range bound to be assumed. "
-            f"Check them in the Translation tab.")
+        note("warn", f"{len(assumed)} condition(s) needed a range bound to be "
+                     f"assumed. See the Translation tab.")
 
-layout_only = (fmt == "grid" and not any(p.get("logic") for p in points))
+if book and any(not p.get("logic") for p in points):
+    cb_report = resolve_points(points, book)
+    filled = sum(1 for r in cb_report if r["logic"])
+    near = sum(1 for r in cb_report if r["status"] == "near")
+    note("ok" if filled else "warn",
+         f"Codebook matched {filled} of {len(cb_report)} unresolved column(s)."
+         + (f" {near} matched below 95% - check them." if near else ""))
+
 drafted = []
-if layout_only:
-    st.warning(
-        "This sheet has group headings and column labels but **no conditions**. "
-        "The banner below is built with draft logic: everything except the "
-        "logic lines is correct, and each drafted line is listed for checking."
-    )
-    for note in layout_checks(points):
-        st.info(note)
-    drafted = apply_drafts(points, total_logic=total_logic or "TOTAL")
-
-book, cb_report = {}, []
-if codebook_file is not None:
-    try:
-        book = load_codebook(codebook_file, codebook_file.name)
-        info = codebook_summary(book)
-        st.success(
-            f"Codebook read: {info['variables']} variables, {info['codes']} codes."
-        )
-    except Exception as exc:  # noqa: BLE001
-        st.error(f"Could not read the codebook: {exc}")
-
-if book:
-    missing = [p for p in points if not p.get("logic")]
-    if missing:
-        cb_report = resolve_points(points, book)
-        filled = sum(1 for r in cb_report if r["logic"])
-        near = sum(1 for r in cb_report if r["status"] == "near")
-        if filled:
-            st.success(
-                f"Matched {filled} column(s) against the codebook."
-                + (f" {near} matched below 95% and need checking." if near else "")
-            )
+if fmt == "grid" and not any(p.get("logic") for p in points):
+    note("error",
+         "This sheet has labels but **no conditions**. The banner uses drafted "
+         "logic: positional guesses, not read from a questionnaire. Upload a "
+         "codebook to resolve them properly.")
+    for n in layout_checks(points):
+        note("warn", n)
+    drafted = apply_drafts(points, total_logic=total_logic or "TN")
 
 skipped = [p for p in points if not p.get("logic")]
 points = [p for p in points if p.get("logic")]
-for i, p in enumerate(points, start=1):
-    p["column"] = i
-
-add_total = st.checkbox(
-    "Prepend a total column", value=bool(profile.get("prepend_total")),
-    help="Spec sheets list the analytical columns only. The total is added "
-         "here, with a label reserved for it so the header stays aligned.",
-)
-if add_total:
-    points = prepend_total(points, {**profile, "prepend_total": True,
-                                       "total_logic": total_logic or "TN"})
-
-for note in check_total_alignment(points):
-    st.error(note)
+if skipped:
+    note("warn", f"{len(skipped)} column(s) have no usable logic and were left "
+                 f"out: " + ", ".join(repr(p["label"]) for p in skipped[:5])
+                 + (" ..." if len(skipped) > 5 else ""))
 
 if not points:
     st.error("No columns have usable logic - nothing to generate.")
+    for lv, msg in CHECKS:
+        getattr(st, LEVELS[lv])(msg)
     st.stop()
 
+if add_total:
+    points = prepend_total(points, {
+        **profile, "prepend_total": True,
+        "total_label": total_label, "total_logic": total_logic or "TN",
+    })
+    note("ok", f"Total column prepended as column 1 ({total_label!r} / "
+               f"{total_logic or 'TN'}).")
+
+for n in check_total_alignment(points):
+    note("error", n)
+
+# ---------------------------------------------------------------- generate
 settings = {
     "banner_id": int(banner_id),
     "point_width": int(point_width),
@@ -2081,114 +2099,114 @@ settings = {
 }
 
 text, warnings, errors, stats = emit(points, settings)
+for w in warnings:
+    note("warn", w)
+for e in errors:
+    note("error", e)
 
-# ----------------------------------------------------------------- output
+# ------------------------------------------------------------------ output
+problems = sum(1 for lv, _ in CHECKS if lv in ("warn", "error"))
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Columns", stats["columns"])
 c2.metric("Report width", f"{stats['report_width']} chars")
 c3.metric("Widths used", ", ".join(str(w) for w in stats["widths_used"]))
-c4.metric("Warnings", len(warnings))
+c4.metric("Needs attention", problems)
 
-if errors:
-    st.error("Generation blocked - fix these first:")
-    for msg in errors:
-        st.write(f"- {msg}")
-    st.stop()
-
-if warnings:
-    with st.expander(f"{len(warnings)} warning(s) - review before shipping", expanded=True):
-        for msg in warnings:
-            st.warning(msg)
-
-names = ["Banner file", "Column map", "Header preview"]
+names = [f"Checks ({problems})" if problems else "Checks",
+         "Banner file", "Column map", "Header preview"]
 if report:
     names.append("Translation")
-if drafted:
-    names.append("Drafted logic")
 if cb_report:
     names.append("Codebook matches")
+if drafted:
+    names.append("Drafted logic")
 tabs = st.tabs(names)
-tab_file, tab_cols, tab_header = tabs[0], tabs[1], tabs[2]
-tab_trans = tabs[names.index("Translation")] if report else None
-tab_draft = tabs[names.index("Drafted logic")] if drafted else None
-tab_cb = tabs[names.index("Codebook matches")] if cb_report else None
 
-with tab_file:
-    st.download_button(
-        "Download banner file", data=text.encode("utf-8"),
-        file_name=f"{chosen.replace(':', '').replace(' ', '_')}.txt",
-        mime="text/plain",
+with tabs[0]:
+    st.caption(
+        "Everything the tool noticed while reading the spec. Errors mean a "
+        "column was left out or will be wrong; warnings are worth a look."
     )
-    st.code(text, language="text")
+    for level in ("error", "warn", "ok"):
+        for lv, msg in CHECKS:
+            if lv == level:
+                getattr(st, LEVELS[lv])(msg)
+    with st.expander("Which layouts are supported?"):
+        st.markdown(LAYOUTS)
 
-with tab_cols:
+with tabs[1]:
+    if errors:
+        st.error("Generation blocked - see the Checks tab.")
+    else:
+        st.download_button(
+            "Download banner file", data=text.encode("utf-8"),
+            file_name=f"{chosen.replace(':', '').replace(' ', '_')}.txt",
+            mime="text/plain",
+        )
+        st.code(text, language="text")
+
+with tabs[2]:
     st.dataframe(
-        [
-            {
-                "Col": p["column"],
-                "Width": p["width"],
-                "Label": p["label"].replace("\n", " / "),
-                "Group": p["group"].replace("\n", " "),
-                "Super": p["super"].replace("\n", " "),
-                "Logic": p["logic"],
-            }
-            for p in points
-        ],
+        [{"Col": p["column"], "Width": p["width"],
+          "Label": p["label"].replace("\n", " "),
+          "Group": (p.get("tiers") or [""])[0].replace("\n", " "),
+          "Logic": p["logic"]}
+         for p in points],
         use_container_width=True, hide_index=True,
     )
 
-with tab_header:
+with tabs[3]:
     if not emit_header:
         st.info("Header block generation is switched off in the sidebar.")
     else:
-        block = text.rstrip("\n").split("\n")[13 + len(points):]
         st.caption(
-            "Rule lines span each merged heading: the summed column widths "
-            "plus the spacers between them. Scroll horizontally to inspect."
+            "Rule lines span each heading: the summed column widths plus the "
+            "spacers between them. Every line runs the full report width."
         )
-        st.code("\n".join(block), language="text")
+        st.code("\n".join(text.rstrip("\n").split("\n")[13 + len(points):]),
+                language="text")
 
-
-if tab_trans is not None:
-    with tab_trans:
-        st.caption(
-            "How each plan condition was turned into WinCross logic. "
-            "'blocked' rows are excluded from the generated file."
-        )
+if report:
+    with tabs[names.index("Translation")]:
+        st.caption("How each plan condition became WinCross logic. "
+                   "'blocked' rows are excluded from the file.")
         st.dataframe(
-            [
-                {
-                    "Col": r["column"],
-                    "Status": r["status"],
-                    "Label": r["label"],
-                    "Condition": r["condition"],
-                    "WinCross": r["expression"] or "-",
-                    "Note": r["note"],
-                }
-                for r in report if r["banner"] == chosen
-            ],
+            [{"Col": r["column"], "Status": r["status"], "Label": r["label"],
+              "Condition": r["condition"], "WinCross": r["expression"] or "-",
+              "Note": r["note"]}
+             for r in report if r["banner"] == chosen],
             use_container_width=True, hide_index=True,
         )
 
-
-if tab_draft is not None:
-    with tab_draft:
-        st.error(
-            "Every line below is a positional guess, not a reading of the "
-            "questionnaire. Check each one before this banner is used. Labels "
-            "that are nets across several codes will be wrong."
+if cb_report:
+    with tabs[names.index("Codebook matches")]:
+        st.caption(
+            "Each group was matched as a set against the codebook: the "
+            "variable whose value labels fit the whole group wins. Anything "
+            "below 95% is worth checking."
         )
         st.dataframe(
-            [
-                {
-                    "Col": d["column"],
-                    "Group": d["group"],
-                    "Label": d["label"].replace("\n", " "),
-                    "Drafted logic": d["logic"],
-                    "Why": d["why"],
-                }
-                for d in drafted
-            ],
+            [{"Col": r["column"], "Status": r["status"],
+              "Group": r["group"].replace("\n", " "),
+              "Label": r["label"].replace("\n", " "),
+              "Variable": r["variable"], "Logic": r["logic"] or "-",
+              "Match": f"{r['score']:.0%}", "Note": r["note"]}
+             for r in cb_report],
+            use_container_width=True, hide_index=True,
+        )
+
+if drafted:
+    with tabs[names.index("Drafted logic")]:
+        st.error(
+            "Every line below is a positional guess. Check each against the "
+            "questionnaire, or upload a codebook to resolve them properly. "
+            "Labels that are nets across several codes will be wrong."
+        )
+        st.dataframe(
+            [{"Col": d["column"], "Group": d["group"],
+              "Label": d["label"].replace("\n", " "),
+              "Drafted logic": d["logic"], "Why": d["why"]}
+             for d in drafted],
             use_container_width=True, hide_index=True,
         )
         buf = io.BytesIO()
@@ -2196,30 +2214,6 @@ if tab_draft is not None:
         st.download_button(
             "Download fill-in spreadsheet instead", data=buf.getvalue(),
             file_name="banner_template.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-
-if tab_cb is not None:
-    with tab_cb:
-        st.caption(
-            "Each group of columns was matched as a set against the codebook: "
-            "the variable whose value labels fit the whole group wins. "
-            "Anything below 95% is worth a look."
-        )
-        st.dataframe(
-            [
-                {
-                    "Col": r["column"],
-                    "Status": r["status"],
-                    "Group": r["group"].replace("\n", " "),
-                    "Label": r["label"].replace("\n", " "),
-                    "Variable": r["variable"],
-                    "Logic": r["logic"] or "-",
-                    "Match": f"{r['score']:.0%}",
-                    "Note": r["note"],
-                }
-                for r in cb_report
-            ],
-            use_container_width=True, hide_index=True,
+            mime="application/vnd.openxmlformats-officedocument."
+                 "spreadsheetml.sheet",
         )
