@@ -1,12 +1,12 @@
-"""
-WinCross Banner Generator - Streamlit app.
-
-Upload a banner specification, pick the client, download a WinCross banner
-file. Everything the tool wants to tell you about the spec is collected in
-one Checks tab rather than stacked above the output.
-
-Run locally:   streamlit run app.py
-"""
+#
+# WinCross Banner Generator - Streamlit app.
+#
+# Upload a banner specification, pick the client, download a WinCross banner
+# file. Everything the tool wants to tell you about the spec is collected in
+# one Checks tab rather than stacked above the output.
+#
+# Run locally:   streamlit run app.py
+#
 
 import io
 import re
@@ -22,18 +22,18 @@ import streamlit as st
 # ====================================================================
 # safe_load.py
 # ====================================================================
-"""
-Open a workbook that openpyxl would otherwise refuse.
-
-Files written by some tools carry stylesheet attributes openpyxl does not
-recognise, and loading them raises a TypeError before any data is read:
-
-    CellStyle.__init__() got an unexpected keyword argument 'applyColorFormat'
-
-The data is fine; only the styling is unusual. This retries by stripping the
-offending attributes from a copy of the file. Nothing the generator does
-depends on cell styling, so nothing is lost.
-"""
+#
+# Open a workbook that openpyxl would otherwise refuse.
+#
+# Files written by some tools carry stylesheet attributes openpyxl does not
+# recognise, and loading them raises a TypeError before any data is read:
+#
+#     CellStyle.__init__() got an unexpected keyword argument 'applyColorFormat'
+#
+# The data is fine; only the styling is unusual. This retries by stripping the
+# offending attributes from a copy of the file. Nothing the generator does
+# depends on cell styling, so nothing is lost.
+#
 
 import io
 import re
@@ -92,20 +92,20 @@ def load(source, **kwargs):
 # ====================================================================
 # width_spacing.py
 # ====================================================================
-"""
-Width and spacing handling for generated WinCross banners.
-
-Encodes the constraints from Setup|Banners|Edit Banner > Width and Spacing:
-
-  - "Spaces before each column" is a SINGLE value applied to ALL columns.
-    The job file physically allows a different value per column, but editing
-    the banner in the GUI afterwards will raise a warning. So we validate it.
-  - Maximum spaces before each column is 5.
-  - Default column width is 10 characters; width is set PER COLUMN.
-  - Column divider characters are limited to the number of spaces before
-    each column (1 space -> 1 divider char, 2 spaces -> 2 chars, etc).
-  - Hidden columns do not count toward overall report width.
-"""
+#
+# Width and spacing handling for generated WinCross banners.
+#
+# Encodes the constraints from Setup|Banners|Edit Banner > Width and Spacing:
+#
+#   - "Spaces before each column" is a SINGLE value applied to ALL columns.
+#     The job file physically allows a different value per column, but editing
+#     the banner in the GUI afterwards will raise a warning. So we validate it.
+#   - Maximum spaces before each column is 5.
+#   - Default column width is 10 characters; width is set PER COLUMN.
+#   - Column divider characters are limited to the number of spaces before
+#     each column (1 space -> 1 divider char, 2 spaces -> 2 chars, etc).
+#   - Hidden columns do not count toward overall report width.
+#
 
 MAX_SPACES = 5
 DEFAULT_WIDTH = 10
@@ -231,26 +231,26 @@ def width_report(points, spaces_before):
 # ====================================================================
 # header_block.py
 # ====================================================================
-"""
-Render the WinCross banner header block: the tiered rule lines and centred
-label rows that sit beneath the logic lines in the banner file.
-
-Derived from the structure of a known-good file and verified against its
-rule spans. The layout is:
-
-    <rule line>        dots spanning each super-header group
-    <label line>       super-header labels, centred in their span
-    <rule line>        dots spanning each column group
-    <label line>       group labels, centred in their span
-    <blank>
-    <rule line>        dots spanning each individual column
-    <label line>       column labels, centred
-    <label line>...    continuation rows for wrapped labels
-
-A rule spanning columns a..b is (sum of widths) + (number of internal
-spacers) characters wide. Labels wrap on double-space, matching the
-convention in the client's banner structure sheets.
-"""
+#
+# Render the WinCross banner header block: the tiered rule lines and centred
+# label rows that sit beneath the logic lines in the banner file.
+#
+# Derived from the structure of a known-good file and verified against its
+# rule spans. The layout is:
+#
+#     <rule line>        dots spanning each super-header group
+#     <label line>       super-header labels, centred in their span
+#     <rule line>        dots spanning each column group
+#     <label line>       group labels, centred in their span
+#     <blank>
+#     <rule line>        dots spanning each individual column
+#     <label line>       column labels, centred
+#     <label line>...    continuation rows for wrapped labels
+#
+# A rule spanning columns a..b is (sum of widths) + (number of internal
+# spacers) characters wide. Labels wrap on double-space, matching the
+# convention in the client's banner structure sheets.
+#
 
 
 RULE_CHAR = "."
@@ -373,23 +373,23 @@ def render(points, spaces_before=1, stub=1, justification=None, wrap=True):
 # ====================================================================
 # logic_translate.py
 # ====================================================================
-"""
-Translate banner-plan conditions into WinCross logic expressions.
-
-Banner plans are written for humans: `S0=1`, `S8=1 OR 3`, `S4>14`. WinCross
-wants `S0(1)`, `S8(1,3)`, `S4(15-9999)`. This module does that translation
-and, just as importantly, refuses to guess when it cannot.
-
-Every result carries a status:
-
-    ok        translated with no assumptions
-    assumed   translated, but a range bound had to be supplied
-    blocked   cannot be translated; needs a human
-
-`blocked` is the point of the module. A banner plan that still contains
-`S5r4>XX` has an unfilled placeholder in it, and silently emitting something
-plausible would put a wrong column into a deliverable.
-"""
+#
+# Translate banner-plan conditions into WinCross logic expressions.
+#
+# Banner plans are written for humans: `S0=1`, `S8=1 OR 3`, `S4>14`. WinCross
+# wants `S0(1)`, `S8(1,3)`, `S4(15-9999)`. This module does that translation
+# and, just as importantly, refuses to guess when it cannot.
+#
+# Every result carries a status:
+#
+#     ok        translated with no assumptions
+#     assumed   translated, but a range bound had to be supplied
+#     blocked   cannot be translated; needs a human
+#
+# `blocked` is the point of the module. A banner plan that still contains
+# `S5r4>XX` has an unfilled placeholder in it, and silently emitting something
+# plausible would put a wrong column into a deliverable.
+#
 
 import re
 
@@ -577,24 +577,24 @@ def parse_placeholders(text):
 # ====================================================================
 # excel_spec.py
 # ====================================================================
-"""
-Read a banner structure / banner spec workbook into a list of banner points.
-
-The sheets used in practice share one grid layout:
-
-      col A      | col B      | col C      | ...
-    ------------------------------------------------
-    (blank)      |                                     <- row 1, usually empty
-    (blank)      | super-header, merged across columns  <- row 2
-    (blank)      | group heading, merged across columns <- row 3
-    (blank)      | column label                         <- row 4
-    (blank)      | (sometimes blank)                    <- row 5
-    (blank)      | banner logic                         <- last used row
-
-Merged cell ranges carry the spans directly, so headings are read rather
-than inferred. The logic row is located as the last row containing data,
-which handles sheets with and without the blank spacer row.
-"""
+#
+# Read a banner structure / banner spec workbook into a list of banner points.
+#
+# The sheets used in practice share one grid layout:
+#
+#       col A      | col B      | col C      | ...
+#     ------------------------------------------------
+#     (blank)      |                                     <- row 1, usually empty
+#     (blank)      | super-header, merged across columns  <- row 2
+#     (blank)      | group heading, merged across columns <- row 3
+#     (blank)      | column label                         <- row 4
+#     (blank)      | (sometimes blank)                    <- row 5
+#     (blank)      | banner logic                         <- last used row
+#
+# Merged cell ranges carry the spans directly, so headings are read rather
+# than inferred. The logic row is located as the last row containing data,
+# which handles sheets with and without the blank spacer row.
+#
 
 import re
 
@@ -733,25 +733,25 @@ def parse_width_overrides(text):
 # ====================================================================
 # plan_reader.py
 # ====================================================================
-"""
-Read a banner plan laid out vertically, one row per banner column.
-
-This is the second of the two shapes seen in practice. Where the banner
-structure sheet runs horizontally with one column per banner point, a
-banner plan runs downwards under named headings:
-
-    Column | Variable | Group | Label | Response | Condition | N | ...
-      1    | Total    |   1   |       | Total    | All resp. | 135
-      2    | S0       |   2   | Geog. | US       | S0=1      |  75
-      3    |          |       |       | EUR      | S0=2,3... |  60
-
-One sheet can hold several banners, each introduced by a title row such as
-"Banner 2: US (S0=1)" followed by its own heading row. Group headings come
-from the Label column, which is merged down the rows it covers.
-
-Conditions are written in plan syntax, not WinCross syntax, so they are put
-through the translator and their status is carried on each point.
-"""
+#
+# Read a banner plan laid out vertically, one row per banner column.
+#
+# This is the second of the two shapes seen in practice. Where the banner
+# structure sheet runs horizontally with one column per banner point, a
+# banner plan runs downwards under named headings:
+#
+#     Column | Variable | Group | Label | Response | Condition | N | ...
+#       1    | Total    |   1   |       | Total    | All resp. | 135
+#       2    | S0       |   2   | Geog. | US       | S0=1      |  75
+#       3    |          |       |       | EUR      | S0=2,3... |  60
+#
+# One sheet can hold several banners, each introduced by a title row such as
+# "Banner 2: US (S0=1)" followed by its own heading row. Group headings come
+# from the Label column, which is merged down the rows it covers.
+#
+# Conditions are written in plan syntax, not WinCross syntax, so they are put
+# through the translator and their status is carried on each point.
+#
 
 import re
 
@@ -907,31 +907,31 @@ def summarise(report):
 # ====================================================================
 # vertical_reader.py
 # ====================================================================
-"""
-Read a vertical banner sheet that carries no header row.
-
-Two of the shapes seen in practice run downwards but have no
-Label/Response/Condition heading to key on:
-
-  separate group column        group headings sit in their own column,
-                               merged down the rows they cover
-
-      Store Preference | Those who prefer home depot | D2a: ...
-                       | Those who prefer competitor | D2a: ...
-      Income           | Less than $500k             | D3 = 1,2,3
-
-  group heading rows           a row with a label but no condition opens a
-                               new group; the rows beneath it are its columns
-
-      Q2: Pack Vs. Stick buying
-      Pack buyers                                    | Q2=2
-      Loose stick buyers                             | Q2=1
-
-Both are handled by locating the condition column first - it is the one
-whose cells look like conditions - and then reading the rest relative to it.
-Blank separator rows are ignored, and a row whose condition is prose rather
-than logic is carried through so the translator can report it.
-"""
+#
+# Read a vertical banner sheet that carries no header row.
+#
+# Two of the shapes seen in practice run downwards but have no
+# Label/Response/Condition heading to key on:
+#
+#   separate group column        group headings sit in their own column,
+#                                merged down the rows they cover
+#
+#       Store Preference | Those who prefer home depot | D2a: ...
+#                        | Those who prefer competitor | D2a: ...
+#       Income           | Less than $500k             | D3 = 1,2,3
+#
+#   group heading rows           a row with a label but no condition opens a
+#                                new group; the rows beneath it are its columns
+#
+#       Q2: Pack Vs. Stick buying
+#       Pack buyers                                    | Q2=2
+#       Loose stick buyers                             | Q2=1
+#
+# Both are handled by locating the condition column first - it is the one
+# whose cells look like conditions - and then reading the rest relative to it.
+# Blank separator rows are ignored, and a row whose condition is prose rather
+# than logic is carried through so the translator can report it.
+#
 
 import re
 
@@ -1100,32 +1100,32 @@ def read_headerless(path_or_buffer, sheet=None, default_width=10,
 # ====================================================================
 # codebook.py
 # ====================================================================
-"""
-Resolve value labels to variable codes using a codebook.
-
-The hardest banner specs are the ones that give only value labels: a column
-headed "50-99 employees" under a group called "Company size", with no
-variable name and no code. Nothing in the banner says that is `D1(3)` -
-that lives in the data. So the data has to be supplied.
-
-Two sources work:
-
-  SPSS .sav      variable and value labels are read directly
-  spreadsheet    three columns: Variable | Value | Label
-
-Given those, a label can be looked up. Two routes:
-
-  resolve_in()    the variable is known - find the code whose label matches
-  infer_group()   the variable is not known - find the variable whose set of
-                  value labels best matches the group's set of column labels
-
-The second is what makes a label-only spec workable. A group with the
-labels {Pack buyers, Loose stick buyers} matches exactly one variable in a
-typical codebook, and once the variable is identified every code follows.
-
-Every result carries a score and the matches are reported, because a label
-that merely resembles a value label is a trap, not an answer.
-"""
+#
+# Resolve value labels to variable codes using a codebook.
+#
+# The hardest banner specs are the ones that give only value labels: a column
+# headed "50-99 employees" under a group called "Company size", with no
+# variable name and no code. Nothing in the banner says that is `D1(3)` -
+# that lives in the data. So the data has to be supplied.
+#
+# Two sources work:
+#
+#   SPSS .sav      variable and value labels are read directly
+#   spreadsheet    three columns: Variable | Value | Label
+#
+# Given those, a label can be looked up. Two routes:
+#
+#   resolve_in()    the variable is known - find the code whose label matches
+#   infer_group()   the variable is not known - find the variable whose set of
+#                   value labels best matches the group's set of column labels
+#
+# The second is what makes a label-only spec workable. A group with the
+# labels {Pack buyers, Loose stick buyers} matches exactly one variable in a
+# typical codebook, and once the variable is identified every code follows.
+#
+# Every result carries a score and the matches are reported, because a label
+# that merely resembles a value label is a trap, not an answer.
+#
 
 import re
 from difflib import SequenceMatcher
@@ -1334,21 +1334,21 @@ def resolve_points(points, book, threshold=0.75, only_missing=True):
 # ====================================================================
 # profiles.py
 # ====================================================================
-"""
-Per-client banner conventions.
-
-Each client wants the same banner built slightly differently: whether a
-total column is prepended, what logic that column uses, how wide the
-columns run, and which header directives are carried. Holding those as
-named profiles means the person generating the banner picks the client
-rather than remembering the settings.
-
-The total column is the one that matters most. A spec sheet lists the
-analytical columns only; the total is added by the job. If it is added
-without a label being reserved for it, every header label sits one column
-to the left of the data it describes - which is a silent error, because
-the numbers underneath are all correct.
-"""
+#
+# Per-client banner conventions.
+#
+# Each client wants the same banner built slightly differently: whether a
+# total column is prepended, what logic that column uses, how wide the
+# columns run, and which header directives are carried. Holding those as
+# named profiles means the person generating the banner picks the client
+# rather than remembering the settings.
+#
+# The total column is the one that matters most. A spec sheet lists the
+# analytical columns only; the total is added by the job. If it is added
+# without a label being reserved for it, every header label sits one column
+# to the left of the data it describes - which is a silent error, because
+# the numbers underneath are all correct.
+#
 
 TOTAL_LOGIC = "TN"   # what a total column uses; confirmed from a live job file
 
@@ -1474,7 +1474,7 @@ def check_total_alignment(points):
 # ====================================================================
 # generator.py
 # ====================================================================
-"""Assemble a WinCross banner file from banner points."""
+# Assemble a WinCross banner file from banner points.
 
 
 
@@ -1592,20 +1592,20 @@ def emit(points, settings=None):
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
-"""
-Turn a layout-only banner sheet into a fill-in template.
-
-Some banners arrive as layout alone: group headings and column labels, no
-conditions. There is nothing to generate from that, because the mapping
-from a label like "50-99 employees" to a code like `D1(3)` lives in the
-questionnaire, not in the banner.
-
-Rather than rejecting the file, this writes it back out with a Condition
-row added, ready to be completed and re-uploaded. It also extracts the
-variable name from each group heading - "Company size (D1)" gives `D1` -
-and offers a sequential draft, clearly marked as unverified, since code
-order frequently does not follow label order.
-"""
+#
+# Turn a layout-only banner sheet into a fill-in template.
+#
+# Some banners arrive as layout alone: group headings and column labels, no
+# conditions. There is nothing to generate from that, because the mapping
+# from a label like "50-99 employees" to a code like `D1(3)` lives in the
+# questionnaire, not in the banner.
+#
+# Rather than rejecting the file, this writes it back out with a Condition
+# row added, ready to be completed and re-uploaded. It also extracts the
+# variable name from each group heading - "Company size (D1)" gives `D1` -
+# and offers a sequential draft, clearly marked as unverified, since code
+# order frequently does not follow label order.
+#
 
 import re
 
