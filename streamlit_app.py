@@ -475,6 +475,26 @@ def translate(condition, var_hint="", lo=DEFAULT_MIN, hi=DEFAULT_MAX,
             "describes the whole sample rather than a condition - a total "
             "column needs its base defined explicitly")
 
+    # A sum across the rows of a battery: 'S4r1 + r2 + r3 <= 10'. The
+    # shorthand means S4r1 + S4r2 + S4r3. WinCross has no inline arithmetic,
+    # so this needs a constructed variable - but the intent is clear enough
+    # to say exactly what is needed.
+    if "+" in text and re.search(r"(<=|>=|<|>|=)", text):
+        head, op, rhs = re.split(r"(<=|>=|<|>|=)", text, maxsplit=1)[:3]
+        terms = [t.strip() for t in head.split("+") if t.strip()]
+        if len(terms) > 1:
+            stem = re.match(r"([A-Za-z_]+\d*[A-Za-z_]*?)(?:r?\d+)?$", terms[0])
+            prefix = stem.group(1) if stem else ""
+            full = [terms[0]] + [
+                t if re.match(r"[A-Za-z_]{2,}", t) else f"{prefix}{t}"
+                for t in terms[1:]
+            ]
+            return Translation(
+                raw, "", "blocked",
+                f"this sums {' + '.join(full)} and compares the total to "
+                f"{rhs.strip()}. WinCross has no inline arithmetic - build a "
+                f"constructed variable for the sum, then condition on that")
+
     if PLACEHOLDER.search(text):
         return Translation(
             raw, "", "blocked",
@@ -541,6 +561,17 @@ def translate(condition, var_hint="", lo=DEFAULT_MIN, hi=DEFAULT_MAX,
             return Translation(raw, f"{var}({body})", "ok")
         return Translation(raw, "", "blocked",
                            f"right-hand side {rhs!r} is not a list of codes")
+
+    # A hyphen or colon where an equals sign was meant: 'S0-1' for 'S0=1'.
+    # Common enough to be worth naming rather than reporting as unparseable.
+    m = re.fullmatch(r"([A-Za-z_]\w*)\s*[-\u2013]\s*(\d+(?:\s*,\s*\d+)*)", text)
+    if m:
+        var, codes = m.group(1), m.group(2)
+        guess = f"{var}({','.join(c.strip() for c in codes.split(','))})"
+        return Translation(
+            raw, "", "blocked",
+            f"looks like a typo - a hyphen where '=' was meant. If it should "
+            f"be {var}={codes}, the logic is {guess}")
 
     # 'D2a: Prefers home depot' names the variable but describes the cut in
     # words. Say which variable it is - that is the useful half of the answer.
@@ -1374,15 +1405,17 @@ PROFILES = {
     "IN2": {
         "key": "in2",
         "description": (
-            "Banner structure grid, two heading tiers. Wide columns on the "
-            "lead segments; no total column is added."
+            "Banner plan with its own Total row, so no total is prepended - "
+            "the spec's 'All respondents' becomes TN."
         ),
         "prepend_total": False,
         "total_label": "Total",
         "total_logic": TOTAL_LOGIC,
         "total_width": 20,
         "default_width": 10,
-        "width_overrides": {1: 20, 2: 20, 6: 20},
+        # taken from a live IN2 job file: total and the two lead
+        # segment columns run wide, the rest at the default
+        "width_overrides": {1: 20, 2: 20, 5: 20},
         "spaces_before": 1,
         "stat_test": "^  ,0",
         "comparison_groups": "0,0",
