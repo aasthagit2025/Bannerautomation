@@ -14,6 +14,7 @@ import zipfile
 import warnings
 
 import openpyxl
+from openpyxl.utils import get_column_letter
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 import streamlit as st
@@ -300,18 +301,26 @@ def spans(points, spaces_before, key):
     return out
 
 
-def tier(points, spaces_before, key, stub, how="center"):
-    """Return (rule_line, [label_lines]) for one header tier."""
+def tier(points, spaces_before, key, stub, how="center", wrap=True):
+    """Return (rule_line, [label_lines]) for one header tier.
+
+    Heading labels wrap within their span exactly as column labels do.
+    Without this a heading wider than the columns it covers is simply cut -
+    "Q2: Pack Vs. Stick buying" over a 21-character span becomes
+    "Q2: Pack Vs. Stick bu", which is how a group loses its name.
+    """
     segs = spans(points, spaces_before, key)
 
-    rule, labels = " " * stub, " " * stub
-    depth = max((len(label_lines(s[0])) for s in segs), default=1)
+    wrapped_all = [wrap_to(lab, width) if wrap else label_lines(lab)
+                   for lab, _, _, width in segs]
+    rule = " " * stub
+    depth = max((len(w) for w in wrapped_all), default=1)
     rows = [" " * stub for _ in range(depth)]
 
     for idx, (lab, _, _, width) in enumerate(segs):
-        gap = " " * spaces_before if idx else ""
+        gap = " " * spaces_before
         rule += gap + RULE_CHAR * width
-        wrapped = label_lines(lab)
+        wrapped = wrapped_all[idx]
         for r in range(depth):
             piece = wrapped[r] if r < len(wrapped) else ""
             rows[r] += gap + justify(piece, width, how)
@@ -338,19 +347,19 @@ def render(points, spaces_before=1, stub=1, justification=None, wrap=True):
             p["_tier"] = tiers[idx] if idx < len(tiers) else ""
         name = "super" if idx == 0 else "group"
         rule, labels = tier(points, spaces_before, "_tier", stub,
-                            just.get(name, "center"))
+                            just.get(name, "center"), wrap)
         lines.append(rule)
         lines.extend(labels)
     for p in points:
         p.pop("_tier", None)
 
-    if depth:
-        lines.append("")
+    # WinCross writes no blank between the heading tiers and the column
+    # labels, and closes the block with one full-width line of spaces.
 
     # Column tier: every column is its own span, so key on a unique index
     for i, p in enumerate(points):
         p["_col"] = f"{p['label']}\x00{i}"
-    rule, _ = tier(points, spaces_before, "_col", stub)
+    rule, _ = tier(points, spaces_before, "_col", stub, wrap=False)
     lines.append(rule)
 
     wrapped_all = [wrap_to(p["label"], p["width"]) if wrap
@@ -362,11 +371,14 @@ def render(points, spaces_before=1, stub=1, justification=None, wrap=True):
             wrapped = wrapped_all[idx]
             piece = wrapped[r] if r < len(wrapped) else ""
             how = p.get("justify", just["column"])
-            row += (" " * spaces_before if idx else "") + justify(piece, p["width"], how)
+            row += " " * spaces_before + justify(piece, p["width"], how)
         lines.append(row)
 
     for p in points:
         p.pop("_col", None)
+
+    width = spaces_before * len(points) + sum(p["width"] for p in points) + stub
+    lines.append(" " * width)
     return lines
 
 
@@ -439,17 +451,24 @@ class Translation:
 
 
 def _codes_from_equality(rhs):
-    """'2,3,4 OR 5' -> [2, 3, 4, 5]. Returns None if anything is not numeric."""
+    """'2,3,4 OR 5' -> '2,3,4,5'; '1-4' -> '1-4'; '1-4, 7' -> '1-4,7'.
+
+    Ranges are kept as ranges because WinCross writes them that way, and a
+    spec that says 1-13 means a span rather than two codes.
+    """
     parts = re.split(r"\s*(?:,|\bOR\b|\bor\b|/)\s*", rhs)
-    codes = []
+    out = []
     for part in parts:
         part = part.strip()
         if not part:
             continue
-        if not re.fullmatch(r"-?\d+", part):
+        if re.fullmatch(r"-?\d+", part):
+            out.append(part)
+        elif re.fullmatch(r"\d+\s*-\s*\d+", part):
+            out.append(re.sub(r"\s*-\s*", "-", part))
+        else:
             return None
-        codes.append(int(part))
-    return codes or None
+    return ",".join(out) or None
 
 
 def translate(condition, var_hint="", lo=DEFAULT_MIN, hi=DEFAULT_MAX,
@@ -557,8 +576,7 @@ def translate(condition, var_hint="", lo=DEFAULT_MIN, hi=DEFAULT_MAX,
         var, rhs = m.group(1), m.group(2)
         codes = _codes_from_equality(rhs)
         if codes is not None:
-            body = ",".join(str(c) for c in codes)
-            return Translation(raw, f"{var}({body})", "ok")
+            return Translation(raw, f"{var}({codes})", "ok")
         return Translation(raw, "", "blocked",
                            f"right-hand side {rhs!r} is not a list of codes")
 
@@ -1392,9 +1410,13 @@ PROFILES = {
         ),
         "prepend_total": True,
         "total_label": "Total",
+        # the heading row carries "Total" above the total column too, rather
+        # than leaving that span unlabelled - taken from a live job file
+        "total_group": "Total",
         "total_logic": TOTAL_LOGIC,
-        "total_width": 20,
-        "default_width": 10,
+        # every column runs 30 characters wide in this client's banners
+        "total_width": 30,
+        "default_width": 30,
         "spaces_before": 1,
         "stat_test": "^  ,0",
         "comparison_groups": "0,0",
@@ -1462,15 +1484,17 @@ def prepend_total(points, profile):
         return points
 
     first_group = (points[0].get("tiers") or [""])[0] if points else ""
+    depth = max(1, len(points[0].get("tiers") or [""])) if points else 1
+    heading = profile.get("total_group", "")
     total = {
         "column": 1,
         "label": profile.get("total_label", "Total"),
         "logic": profile.get("total_logic", TOTAL_LOGIC),
         "width": int(profile.get("total_width", 20)),
-        # Its own span in the heading row, so it does not absorb the first
-        # group's heading or push that heading off centre.
-        "tiers": [""] * max(1, len((points[0].get("tiers") or [""]))) if points else [""],
-        "super": "",
+        # Its own span in the heading row, so it neither absorbs the first
+        # group's heading nor pushes that heading off centre.
+        "tiers": [heading] + [""] * (depth - 1),
+        "super": heading,
         "group": "",
         "is_total": True,
     }
@@ -1505,10 +1529,108 @@ def check_total_alignment(points):
 
 
 # ====================================================================
+# expand.py
+# ====================================================================
+#
+# Expand a spec row that stands for several banner columns.
+#
+# Some specs compress a whole group into one row, putting the group name and
+# its members in the label and a code range in the condition:
+#
+#     label      CP=Faisalabad, Gujranwala, Lahore, Sialkot
+#     condition  QS1=1-4
+#
+# That is four banner columns, not one: CP is the heading, the four cities are
+# the labels, and the codes run 1, 2, 3, 4 in the order the names are listed.
+# The deliverable shows them that way, so the banner has to as well.
+#
+# Expansion only happens when the arithmetic agrees - the number of names
+# listed must equal the number of codes in the range. When it does not, the
+# row is left exactly as it was and the mismatch is reported, because a guess
+# about which name goes with which code would be invisible in the output and
+# wrong in the data.
+#
+
+import re
+
+# 'CP=Faisalabad, Gujranwala, Lahore, Sialkot'
+LISTED = re.compile(r"^\s*([^=]{1,40}?)\s*=\s*(.+)$", re.S)
+RANGE = re.compile(r"^([A-Za-z_]\w*)\(\s*(\d+)\s*-\s*(\d+)\s*\)$")
+
+
+def _names(text):
+    parts = [p.strip() for p in re.split(r",|/|\band\b", text) if p.strip()]
+    return parts
+
+
+def expand_points(points, report=None):
+    """Return (new_points, notes). Expands rows that stand for a group."""
+    out, notes = [], []
+
+    for p in points:
+        label = str(p.get("label", "")).replace("\n", " ").strip()
+        logic = str(p.get("logic", "")).strip()
+
+        m_lab = LISTED.match(label)
+        m_log = RANGE.match(logic)
+        if not (m_lab and m_log):
+            out.append(p)
+            continue
+
+        heading, listed = m_lab.group(1).strip(), m_lab.group(2)
+        names = _names(listed)
+        var, lo, hi = m_log.group(1), int(m_log.group(2)), int(m_log.group(3))
+        codes = list(range(lo, hi + 1))
+
+        if len(names) < 2:
+            out.append(p)
+            continue
+
+        if len(names) != len(codes):
+            notes.append(
+                f"column {p['column']} ({label[:40]!r}) lists {len(names)} "
+                f"names but the condition covers {len(codes)} codes "
+                f"({var} {lo}-{hi}) - left as a single column, since pairing "
+                f"them would be guesswork")
+            out.append(p)
+            continue
+
+        for name, code in zip(names, codes):
+            child = dict(p)
+            child["label"] = name
+            child["logic"] = f"{var}({code})"
+            child["tiers"] = [heading]
+            child["super"] = heading
+            child["group"] = ""
+            out.append(child)
+
+        notes.append(
+            f"column {p['column']}: expanded into {len(names)} columns under "
+            f"{heading!r} - {', '.join(f'{n} = {var}({c})' for n, c in list(zip(names, codes))[:3])}"
+            + (" ..." if len(names) > 3 else ""))
+
+    for i, p in enumerate(out, start=1):
+        p["column"] = i
+    return out, notes
+
+
+# ====================================================================
 # generator.py
 # ====================================================================
 # Assemble a WinCross banner file from banner points.
 
+
+
+# WinCross writes job files in the Windows Western codepage, not UTF-8. An
+# en dash in a group heading comes out as a single 0x96 byte there; written
+# as UTF-8 it becomes two bytes and every column to its right shifts, which
+# breaks the header alignment the whole file depends on.
+ENCODING = "cp1252"
+
+
+def encode(text, encoding=ENCODING):
+    """Encode a banner file the way WinCross stores one."""
+    return text.encode(encoding, errors="replace")
 
 
 DEFAULTS = {
@@ -1560,12 +1682,25 @@ def consistency_checks(points):
     for p in points:
         key = normalise_logic(p["logic"]).upper()
         seen.setdefault(key, []).append(p["column"])
+
+    # A banner where most columns carry the same expression is not a banner:
+    # every column reports the total and nothing is being crossed. This is
+    # what a layout-only spec produces, and it looks fine until the tables run.
     for logic, cols in seen.items():
-        if len(cols) > 1:
+        if len(cols) >= max(3, len(points) // 2):
             notes.append(
-                f"columns {cols} share identical logic - they will always "
-                f"report the same base and can never test significant against "
-                f"each other")
+                f"{len(cols)} of {len(points)} columns carry the same logic "
+                f"({logic}) - every one of them will report the same base as "
+                f"the total, and the banner will not cross anything. The spec "
+                f"is almost certainly missing its conditions")
+            break
+    else:
+        for logic, cols in seen.items():
+            if len(cols) > 1:
+                notes.append(
+                    f"columns {cols} share identical logic - they will always "
+                    f"report the same base and can never test significant "
+                    f"against each other")
 
     for p in points:
         if not p["logic"]:
@@ -1811,6 +1946,228 @@ def apply_drafts(points, total_logic="TOTAL"):
 
 
 # ====================================================================
+# excel_report.py
+# ====================================================================
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+
+#
+# Write the generated banner out as a workbook.
+#
+# The banner file itself is fixed-width text, which is right for WinCross and
+# awkward for a person checking it. This produces the same content as a
+# workbook that can be reviewed, commented on and circulated:
+#
+#   Columns     one row per banner point - number, stat letter, group, label,
+#               width and logic. This is the sheet to check against the spec.
+#   Checks      everything the tool raised while reading the spec
+#   Banner file the raw text, one row per line, for reference
+#
+# Nothing here is read back by the tool; it exists so the banner can be
+# checked by someone who does not read WinCross syntax.
+#
+
+
+HEAD = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+BODY = Font(name="Calibri", size=11)
+MONO = Font(name="Consolas", size=9)
+HEAD_FILL = PatternFill("solid", fgColor="2F5597")
+BAND = PatternFill("solid", fgColor="F2F6FB")
+TOTAL_FILL = PatternFill("solid", fgColor="FFF2CC")
+ERROR_FILL = PatternFill("solid", fgColor="F8CBAD")
+WARN_FILL = PatternFill("solid", fgColor="FFF2CC")
+OK_FILL = PatternFill("solid", fgColor="E2EFDA")
+thin = Side(style="thin", color="BFBFBF")
+BOX = Border(left=thin, right=thin, top=thin, bottom=thin)
+WRAP = Alignment(vertical="top", wrap_text=True)
+TOP = Alignment(vertical="top")
+
+
+def _letters(n):
+    out = []
+    for i in range(n):
+        letter = chr(ord("A") + i % 26)
+        cycle = i // 26
+        out.append(letter if cycle == 0 else f"{letter}{cycle}")
+    return out
+
+
+def _header(ws, row, titles, widths):
+    for i, (title, width) in enumerate(zip(titles, widths), start=1):
+        c = ws.cell(row, i, title)
+        c.font, c.fill, c.border = HEAD, HEAD_FILL, BOX
+        c.alignment = Alignment(vertical="center", wrap_text=True)
+        ws.column_dimensions[get_column_letter(i)].width = width
+    ws.freeze_panes = ws.cell(row + 1, 1)
+
+
+def write_report(points, banner_text, checks=None, stats=None, meta=None,
+                 path_or_buffer="banner.xlsx"):
+    """Write the banner, its column map and its checks to a workbook."""
+    wb = Workbook()
+
+    # ------------------------------------------------------------ Columns
+    ws = wb.active
+    ws.title = "Columns"
+    letters = _letters(len(points))
+
+    info = []
+    if meta:
+        info.append(f"Client: {meta.get('profile', '-')}")
+        info.append(f"Source: {meta.get('source', '-')}")
+        info.append(f"Layout: {meta.get('format', '-')}")
+    if stats:
+        info.append(f"{stats['columns']} columns")
+        info.append(f"report width {stats['report_width']} characters")
+    ws.cell(1, 1, "   |   ".join(info)).font = Font(size=10, italic=True,
+                                                   color="595959")
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=6)
+
+    _header(ws, 3, ["Col", "Letter", "Group", "Label", "Width", "Logic"],
+            [6, 8, 34, 34, 8, 52])
+
+    for i, p in enumerate(points):
+        r = 4 + i
+        group = (p.get("tiers") or [""])[0].replace("\n", " ").strip()
+        values = [p["column"], letters[i], group,
+                  p["label"].replace("\n", " ").strip(), p["width"], p["logic"]]
+        for col, value in enumerate(values, start=1):
+            c = ws.cell(r, col, value)
+            c.font = MONO if col == 6 else BODY
+            c.border, c.alignment = BOX, WRAP if col in (3, 4, 6) else TOP
+            if p.get("is_total"):
+                c.fill = TOTAL_FILL
+            elif i % 2:
+                c.fill = BAND
+    ws.auto_filter.ref = f"A3:F{3 + len(points)}"
+
+    # ------------------------------------------------------------- Checks
+    cs = wb.create_sheet("Checks")
+    _header(cs, 1, ["Level", "What the tool found"], [12, 120])
+    fills = {"error": ERROR_FILL, "warn": WARN_FILL, "ok": OK_FILL}
+    names = {"error": "Error", "warn": "Warning", "ok": "OK"}
+    rows = checks or []
+    if not rows:
+        rows = [("ok", "No problems raised.")]
+    for i, (level, text) in enumerate(rows):
+        r = 2 + i
+        for col, value in enumerate([names.get(level, level), text], start=1):
+            c = cs.cell(r, col, value)
+            c.font, c.border, c.alignment = BODY, BOX, WRAP
+            c.fill = fills.get(level, BAND)
+
+    # -------------------------------------------------------- Banner file
+    bf = wb.create_sheet("Banner file")
+    _header(bf, 1, ["Line", "Content"], [7, 170])
+    for i, line in enumerate(banner_text.rstrip("\n").split("\n")):
+        r = 2 + i
+        bf.cell(r, 1, i + 1).font = BODY
+        c = bf.cell(r, 2, line)
+        c.font, c.alignment = MONO, TOP
+
+    wb.save(path_or_buffer)
+    return path_or_buffer
+
+
+def write_wincross_layout(points, path_or_buffer="banner_layout.xlsx",
+                          table_title="Table 1"):
+    """Write the banner in the shape WinCross exports a run to Excel.
+
+    One column per banner point, with the heading rows merged across the
+    columns they span, the labels one per cell, and the stat letter row
+    beneath - the layout the Banner sheet of a WinCross export has.
+
+    The frequency rows are left empty: those come from running the tables
+    against the data, which only WinCross can do. This shows the header
+    layout the banner will produce, so it can be checked before a run.
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Banner"
+
+    letters = _letters(len(points))
+    first = 4                                   # banner columns start at D
+
+    ws.cell(1, 2, "Apply Filter").font = BODY
+    ws.cell(1, 3, table_title).font = BODY
+    ws.cell(3, 2, "Job Title 1").font = BODY
+    ws.cell(6, 2, "Table Title 1").font = BODY
+
+    # heading rows, one per tier, merged across the columns each spans
+    depth = max((len(p.get("tiers") or [""]) for p in points), default=1)
+    row = 9
+    for t in range(depth):
+        ws.cell(row, 2, "Banner Text").font = BODY
+        i = 0
+        while i < len(points):
+            tiers = points[i].get("tiers") or [""]
+            value = (tiers[t] if t < len(tiers) else "") or ""
+            j = i
+            if value:
+                while j + 1 < len(points):
+                    nxt = points[j + 1].get("tiers") or [""]
+                    if ((nxt[t] if t < len(nxt) else "") or "") != value:
+                        break
+                    j += 1
+            c = ws.cell(row, first + i, value.replace("\n", " ").strip())
+            c.font, c.alignment, c.border = HEAD, Alignment(
+                horizontal="center", vertical="center", wrap_text=True), BOX
+            c.fill = HEAD_FILL
+            if j > i:
+                ws.merge_cells(start_row=row, start_column=first + i,
+                               end_row=row, end_column=first + j)
+            i = j + 1
+        row += 1
+
+    # column labels, one per cell
+    ws.cell(row, 2, "Banner Text").font = BODY
+    for i, p in enumerate(points):
+        c = ws.cell(row, first + i, p["label"].replace("\n", " ").strip())
+        c.font = Font(name="Calibri", size=11, bold=True)
+        c.alignment = Alignment(horizontal="center", vertical="center",
+                                wrap_text=True)
+        c.border = BOX
+        c.fill = TOTAL_FILL if p.get("is_total") else BAND
+    label_row = row
+    row += 1
+
+    # stat letters
+    ws.cell(row, 2, "Banner Text").font = BODY
+    for i, letter in enumerate(letters):
+        c = ws.cell(row, first + i, f"({letter})")
+        c.font = Font(name="Calibri", size=10, color="595959")
+        c.alignment = Alignment(horizontal="center")
+        c.border = BOX
+    row += 1
+
+    # the logic behind each column, so the header can be checked against it
+    ws.cell(row, 2, "Banner Logic").font = Font(size=10, italic=True,
+                                                color="595959")
+    for i, p in enumerate(points):
+        c = ws.cell(row, first + i, p["logic"])
+        c.font = MONO
+        c.alignment = Alignment(horizontal="center", wrap_text=True)
+        c.border = BOX
+    row += 1
+
+    ws.cell(row, 2, "Filter Frequency Row").font = BODY
+    ws.cell(row, 3, "BASE: Total Respondents").font = BODY
+    for i in range(len(points)):
+        ws.cell(row, first + i, "").border = BOX
+
+    ws.column_dimensions["B"].width = 22
+    ws.column_dimensions["C"].width = 26
+    for i in range(len(points)):
+        ws.column_dimensions[get_column_letter(first + i)].width = 16
+    ws.row_dimensions[label_row].height = 46
+    ws.freeze_panes = ws.cell(label_row + 3, first)
+
+    wb.save(path_or_buffer)
+    return path_or_buffer
+
+
+# ====================================================================
 # reader.py - format detection
 # ====================================================================
 def detect(path_or_buffer):
@@ -1911,7 +2268,7 @@ header label sits one column left of the data it describes - and the numbers
 underneath stay correct, so nothing looks broken.
 """
 
-BUILD = "2026-10-05 / build 7 / profiles + checks tab"
+BUILD = "2026-10-05 / build 11 / matches GUI job geometry"
 
 st.title("WinCross Banner Generator")
 st.caption(
@@ -2082,14 +2439,49 @@ if book and any(not p.get("logic") for p in points):
          + (f" {near} matched below 95% - check them." if near else ""))
 
 drafted = []
-if fmt == "grid" and not any(p.get("logic") for p in points):
-    note("error",
-         "This sheet has labels but **no conditions**. The banner uses drafted "
-         "logic: positional guesses, not read from a questionnaire. Upload a "
-         "codebook to resolve them properly.")
+layout_only = fmt == "grid" and not any(p.get("logic") for p in points)
+if layout_only:
+    st.error(
+        "**This sheet has no conditions in it** - only group headings and "
+        "column labels. A banner built from it cannot cross anything: every "
+        "column would report the same base as the total.\n\n"
+        "Two ways forward, either of which gives a working banner:\n\n"
+        "- upload the sheet that carries the conditions, if there is one "
+        "(often a second tab or a companion file), or\n"
+        "- upload a **codebook** alongside this sheet, so the labels can be "
+        "matched to real variable codes."
+    )
+    proceed = st.checkbox(
+        "Generate anyway with drafted logic (positional guesses - the result "
+        "will not be usable without checking every line)",
+        value=False,
+    )
+    if not proceed:
+        st.stop()
+    note("error", "Built from drafted logic: positional guesses, not read "
+                  "from a questionnaire. Check every line.")
     for n in layout_checks(points):
         note("warn", n)
     drafted = apply_drafts(points, total_logic=total_logic or "TN")
+
+expand_rows = st.checkbox(
+    "Expand rows that list several labels", value=True,
+    help="A row like 'CP=Faisalabad, Gujranwala, Lahore, Sialkot' against "
+         "'QS1=1-4' is four banner columns, not one. Only expands when the "
+         "number of names matches the number of codes.",
+)
+if expand_rows:
+    with_logic = [p for p in points if p.get("logic")]
+    without = [p for p in points if not p.get("logic")]
+    expanded, exp_notes = expand_points(with_logic)
+    if len(expanded) != len(with_logic):
+        note("ok", f"Expanded {len(with_logic)} spec rows into "
+                   f"{len(expanded)} banner columns.")
+    for n in exp_notes:
+        note("warn" if "left as a single column" in n else "ok", n)
+    points = expanded + without
+    for i, p in enumerate(points, start=1):
+        p["column"] = i
 
 skipped = [p for p in points if not p.get("logic")]
 points = [p for p in points if p.get("logic")]
@@ -2174,10 +2566,29 @@ with tabs[1]:
     if errors:
         st.error("Generation blocked - see the Checks tab.")
     else:
-        st.download_button(
-            "Download banner file", data=text.encode("utf-8"),
-            file_name=f"{chosen.replace(':', '').replace(' ', '_')}.txt",
-            mime="text/plain",
+        stem = chosen.replace(":", "").replace(" ", "_")
+        d1, d2 = st.columns(2)
+        with d1:
+            st.download_button(
+                "Download banner file (.txt)", data=encode(text),
+                file_name=f"{stem}.txt", mime="text/plain",
+            )
+        with d2:
+            xbuf = io.BytesIO()
+            write_report(
+                points, text, CHECKS, stats,
+                {"profile": profile_name, "source": uploaded.name, "format": fmt},
+                xbuf,
+            )
+            st.download_button(
+                "Download review workbook (.xlsx)", data=xbuf.getvalue(),
+                file_name=f"{stem}_review.xlsx",
+                mime="application/vnd.openxmlformats-officedocument."
+                     "spreadsheetml.sheet",
+            )
+        st.caption(
+            "The .txt is the banner for WinCross. The workbook holds the same "
+            "content as a column map plus the checks, for review."
         )
         st.code(text, language="text")
 
