@@ -2570,8 +2570,8 @@ with tabs[1]:
         d1, d2 = st.columns(2)
         with d1:
             st.download_button(
-                "Download banner file (.txt)", data=encode(text),
-                file_name=f"{stem}.txt", mime="text/plain",
+                "Download banner file (.job)", data=encode(text),
+                file_name=f"{stem}.job", mime="application/octet-stream",
             )
         with d2:
             xbuf = io.BytesIO()
@@ -2587,7 +2587,7 @@ with tabs[1]:
                      "spreadsheetml.sheet",
             )
         st.caption(
-            "The .txt is the banner for WinCross. The workbook holds the same "
+            "The .job is the banner for WinCross. The workbook holds the same "
             "content as a column map plus the checks, for review."
         )
         st.code(text, language="text")
