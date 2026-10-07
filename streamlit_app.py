@@ -494,6 +494,21 @@ def translate(condition, var_hint="", lo=DEFAULT_MIN, hi=DEFAULT_MAX,
             "describes the whole sample rather than a condition - a total "
             "column needs its base defined explicitly")
 
+    # A condition wrapped in a description: 'Total Customer Sample
+    # (Sample_Type=2)'. Specs often name the base in words and put the real
+    # condition in brackets after it. Take the bracketed part when it parses
+    # on its own; the surrounding prose is a label, not logic.
+    for inner in re.findall(r"\(([^()]+)\)", text):
+        inner = inner.strip()
+        if not inner or not re.search(r"[=<>]", inner):
+            continue
+        sub = translate(inner, var_hint, lo, hi, placeholders)
+        if sub.status != "blocked":
+            extra = f"{sub.note}; " if sub.note else ""
+            return Translation(
+                raw, sub.expr, sub.status,
+                f"{extra}condition taken from {inner!r} inside the description")
+
     # A sum across the rows of a battery: 'S4r1 + r2 + r3 <= 10'. The
     # shorthand means S4r1 + S4r2 + S4r3. WinCross has no inline arithmetic,
     # so this needs a constructed variable - but the intent is clear enough
@@ -817,7 +832,10 @@ HEADINGS = {
     "group": "group_no", "grp": "group_no",
     "label": "group", "group label": "group", "heading": "group",
     "response": "label", "banner point": "label", "text": "label",
+    "banner points": "label", "point": "label",
+    "header": "group", "headers": "group",
     "condition": "condition", "logic": "condition", "definition": "condition",
+    "definitions": "condition", "base": "condition",
     "n": "n", "base": "n", "base size": "n",
 }
 
@@ -832,7 +850,8 @@ def looks_like_plan(ws):
             for c in range(1, min(ws.max_column, 15) + 1)
             if ws.cell(r, c).value not in (None, "")
         }
-        if {"condition", "response"} <= seen or {"condition", "label"} <= seen:
+        mapped = {HEADINGS[k] for k in seen if k in HEADINGS}
+        if "condition" in mapped and "label" in mapped:
             return True
     return False
 
@@ -1619,6 +1638,8 @@ def expand_points(points, report=None):
 # ====================================================================
 # Assemble a WinCross banner file from banner points.
 
+import re
+
 
 
 # WinCross writes job files in the Windows Western codepage, not UTF-8. An
@@ -1701,6 +1722,33 @@ def consistency_checks(points):
                     f"columns {cols} share identical logic - they will always "
                     f"report the same base and can never test significant "
                     f"against each other")
+
+    # Two columns of the same group drawing on overlapping codes of the same
+    # variable will double-count anyone in the overlap. Within a group the
+    # bands are meant to partition, so an overlap is nearly always a typo.
+    pattern = re.compile(r"^([A-Za-z_]\w*)\((\d+)\s*-\s*(\d+)\)$")
+    by_group = {}
+    for p in points:
+        key = (p.get("tiers") or [""])[0]
+        m = pattern.match(str(p.get("logic", "")).strip())
+        if m:
+            by_group.setdefault(key, []).append(
+                (p["column"], p["label"], m.group(1),
+                 int(m.group(2)), int(m.group(3))))
+    for group, bands in by_group.items():
+        for i in range(len(bands)):
+            for j in range(i + 1, len(bands)):
+                c1, l1, v1, a1, b1 = bands[i]
+                c2, l2, v2, a2, b2 = bands[j]
+                if v1 != v2:
+                    continue
+                lo, hi = max(a1, a2), min(b1, b2)
+                if lo <= hi:
+                    shared = f"{lo}" if lo == hi else f"{lo}-{hi}"
+                    notes.append(
+                        f"columns {c1} ({l1!r}) and {c2} ({l2!r}) both include "
+                        f"{v1} code {shared} - anyone there is counted twice, "
+                        f"and the bands will not sum to the group total")
 
     for p in points:
         if not p["logic"]:
@@ -2268,7 +2316,7 @@ header label sits one column left of the data it describes - and the numbers
 underneath stay correct, so nothing looks broken.
 """
 
-BUILD = "2026-10-05 / build 11 / matches GUI job geometry"
+BUILD = "2026-10-05 / build 12 / conditions inside descriptions"
 
 st.title("WinCross Banner Generator")
 st.caption(
@@ -2570,8 +2618,8 @@ with tabs[1]:
         d1, d2 = st.columns(2)
         with d1:
             st.download_button(
-                "Download banner file (.job)", data=encode(text),
-                file_name=f"{stem}.job", mime="application/octet-stream",
+                "Download banner file (.txt)", data=encode(text),
+                file_name=f"{stem}.txt", mime="text/plain",
             )
         with d2:
             xbuf = io.BytesIO()
@@ -2587,7 +2635,7 @@ with tabs[1]:
                      "spreadsheetml.sheet",
             )
         st.caption(
-            "The .job is the banner for WinCross. The workbook holds the same "
+            "The .txt is the banner for WinCross. The workbook holds the same "
             "content as a column map plus the checks, for review."
         )
         st.code(text, language="text")
