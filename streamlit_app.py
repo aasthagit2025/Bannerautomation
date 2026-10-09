@@ -494,21 +494,6 @@ def translate(condition, var_hint="", lo=DEFAULT_MIN, hi=DEFAULT_MAX,
             "describes the whole sample rather than a condition - a total "
             "column needs its base defined explicitly")
 
-    # A condition wrapped in a description: 'Total Customer Sample
-    # (Sample_Type=2)'. Specs often name the base in words and put the real
-    # condition in brackets after it. Take the bracketed part when it parses
-    # on its own; the surrounding prose is a label, not logic.
-    for inner in re.findall(r"\(([^()]+)\)", text):
-        inner = inner.strip()
-        if not inner or not re.search(r"[=<>]", inner):
-            continue
-        sub = translate(inner, var_hint, lo, hi, placeholders)
-        if sub.status != "blocked":
-            extra = f"{sub.note}; " if sub.note else ""
-            return Translation(
-                raw, sub.expr, sub.status,
-                f"{extra}condition taken from {inner!r} inside the description")
-
     # A sum across the rows of a battery: 'S4r1 + r2 + r3 <= 10'. The
     # shorthand means S4r1 + S4r2 + S4r3. WinCross has no inline arithmetic,
     # so this needs a constructed variable - but the intent is clear enough
@@ -832,10 +817,7 @@ HEADINGS = {
     "group": "group_no", "grp": "group_no",
     "label": "group", "group label": "group", "heading": "group",
     "response": "label", "banner point": "label", "text": "label",
-    "banner points": "label", "point": "label",
-    "header": "group", "headers": "group",
     "condition": "condition", "logic": "condition", "definition": "condition",
-    "definitions": "condition", "base": "condition",
     "n": "n", "base": "n", "base size": "n",
 }
 
@@ -850,8 +832,7 @@ def looks_like_plan(ws):
             for c in range(1, min(ws.max_column, 15) + 1)
             if ws.cell(r, c).value not in (None, "")
         }
-        mapped = {HEADINGS[k] for k in seen if k in HEADINGS}
-        if "condition" in mapped and "label" in mapped:
+        if {"condition", "response"} <= seen or {"condition", "label"} <= seen:
             return True
     return False
 
@@ -1638,8 +1619,6 @@ def expand_points(points, report=None):
 # ====================================================================
 # Assemble a WinCross banner file from banner points.
 
-import re
-
 
 
 # WinCross writes job files in the Windows Western codepage, not UTF-8. An
@@ -1723,33 +1702,6 @@ def consistency_checks(points):
                     f"report the same base and can never test significant "
                     f"against each other")
 
-    # Two columns of the same group drawing on overlapping codes of the same
-    # variable will double-count anyone in the overlap. Within a group the
-    # bands are meant to partition, so an overlap is nearly always a typo.
-    pattern = re.compile(r"^([A-Za-z_]\w*)\((\d+)\s*-\s*(\d+)\)$")
-    by_group = {}
-    for p in points:
-        key = (p.get("tiers") or [""])[0]
-        m = pattern.match(str(p.get("logic", "")).strip())
-        if m:
-            by_group.setdefault(key, []).append(
-                (p["column"], p["label"], m.group(1),
-                 int(m.group(2)), int(m.group(3))))
-    for group, bands in by_group.items():
-        for i in range(len(bands)):
-            for j in range(i + 1, len(bands)):
-                c1, l1, v1, a1, b1 = bands[i]
-                c2, l2, v2, a2, b2 = bands[j]
-                if v1 != v2:
-                    continue
-                lo, hi = max(a1, a2), min(b1, b2)
-                if lo <= hi:
-                    shared = f"{lo}" if lo == hi else f"{lo}-{hi}"
-                    notes.append(
-                        f"columns {c1} ({l1!r}) and {c2} ({l2!r}) both include "
-                        f"{v1} code {shared} - anyone there is counted twice, "
-                        f"and the bands will not sum to the group total")
-
     for p in points:
         if not p["logic"]:
             notes.append(f"column {p['column']} ({p['label']!r}) has no logic")
@@ -1800,117 +1752,6 @@ def emit(points, settings=None):
                            wrap=cfg.get("wrap_labels", True))
 
     return "\n".join(lines) + "\n", warnings, [], stats
-
-
-# ====================================================================
-# job_file.py
-# ====================================================================
-#
-# Produce a WinCross .job file from a generated banner.
-#
-# A banner is one section of a job file. The rest - preferences, the glossary,
-# the table definitions, the significance footer - is study-specific and
-# cannot be invented, so the honest way to produce a .job is to take an
-# existing one and replace its [BANNERS] section:
-#
-#     [VERSION]        kept
-#     [PREFERENCES]    kept
-#     [SIGFOOTER]      kept
-#     [GLOSSARY]       kept
-#     [TABLES]         kept - usually the bulk of the file
-#     [BANNERS]        replaced with the generated banner
-#     [SIDEBYSIDE]     kept
-#     [TITLE]          kept
-#
-# Everything outside [BANNERS] is passed through byte for byte, including the
-# file's line endings and its cp1252 encoding, so nothing else shifts.
-#
-# Without a template a banner-only job can still be written, but it is a
-# fragment: useful for pasting into a job through a text editor, not for
-# running on its own. Which one was produced is always reported.
-#
-
-import re
-
-
-SECTION = re.compile(r"^\[[A-Z ]+\]\s*$")
-BANNERS = re.compile(r"^\[BANNERS\]\s*$")
-
-
-def _decode(data):
-    """Read a job file, keeping its line endings."""
-    if isinstance(data, bytes):
-        raw = data.decode(ENCODING, errors="replace")
-    else:
-        raw = data
-    newline = "\r\n" if "\r\n" in raw else "\n"
-    return raw.replace("\r\n", "\n").split("\n"), newline
-
-
-def split_sections(lines):
-    """Return [(name, start, end)] for each section in the file."""
-    marks = [i for i, l in enumerate(lines) if SECTION.match(l)]
-    out = []
-    for n, i in enumerate(marks):
-        end = marks[n + 1] if n + 1 < len(marks) else len(lines)
-        out.append((lines[i].strip(), i, end))
-    return out
-
-
-def splice(template, banner_text):
-    """Replace the [BANNERS] section of `template` with `banner_text`.
-
-    Returns (bytes, note). The template may be bytes, str, or a file-like
-    object; the result carries the template's own line endings.
-    """
-    if hasattr(template, "read"):
-        if hasattr(template, "seek"):
-            template.seek(0)
-        template = template.read()
-    lines, newline = _decode(template)
-
-    sections = split_sections(lines)
-    target = next((s for s in sections if BANNERS.match(s[0] + "")), None)
-    if target is None:
-        target = next((s for s in sections if s[0].startswith("[BANNERS")), None)
-    if target is None:
-        raise ValueError("the template has no [BANNERS] section")
-
-    name, start, end = target
-    banner_lines = banner_text.rstrip("\n").split("\n")
-    out = lines[:start + 1] + banner_lines + lines[end:]
-
-    note = (f"banner replaced in place: {end - start - 1} lines out, "
-            f"{len(banner_lines)} in; the other "
-            f"{len(sections) - 1} sections kept unchanged")
-    return newline.join(out).encode(ENCODING, errors="replace"), note
-
-
-def standalone(banner_text, newline="\r\n"):
-    """A job fragment holding only the banner.
-
-    Not a runnable job on its own - there are no tables in it - but it is
-    the right thing to paste into an existing job, and it keeps the
-    section markers so the boundaries are obvious.
-    """
-    lines = ["[BANNERS]"] + banner_text.rstrip("\n").split("\n") + ["[SIDEBYSIDE]"]
-    data = newline.join(lines).encode(ENCODING, errors="replace")
-    note = ("banner-only job: no tables or preferences in it, so paste the "
-            "[BANNERS] section into a real job rather than running this")
-    return data, note
-
-
-def banner_section(template):
-    """Return the banner text already in a job file, for comparison."""
-    if hasattr(template, "read"):
-        if hasattr(template, "seek"):
-            template.seek(0)
-        template = template.read()
-    lines, _ = _decode(template)
-    for name, start, end in split_sections(lines):
-        if name.startswith("[BANNERS"):
-            return "\n".join(lines[start + 1:end]).rstrip("\n")
-    return ""
 
 
 # ====================================================================
@@ -2427,7 +2268,7 @@ header label sits one column left of the data it describes - and the numbers
 underneath stay correct, so nothing looks broken.
 """
 
-BUILD = "2026-10-05 / build 13 / job file download"
+BUILD = "2026-10-05 / build 11 / matches GUI job geometry"
 
 st.title("WinCross Banner Generator")
 st.caption(
@@ -2454,12 +2295,6 @@ with spec_col:
 with book_col:
     codebook_file = st.file_uploader(
         "Codebook, optional (.sav / .xlsx)", type=["sav", "xlsx", "xlsm"]
-    )
-    job_template = st.file_uploader(
-        "Job file to update, optional (.job)", type=["job"],
-        help="The generated banner replaces this file's [BANNERS] section. "
-             "Tables, preferences and everything else are kept exactly as "
-             "they are, so you get a job file you can run.",
     )
 
 st.caption(profile["description"])
@@ -2732,13 +2567,13 @@ with tabs[1]:
         st.error("Generation blocked - see the Checks tab.")
     else:
         stem = chosen.replace(":", "").replace(" ", "_")
-        d1, d2, d3 = st.columns(3)
+        d1, d2 = st.columns(2)
         with d1:
             st.download_button(
-                "Download banner file (.txt)", data=encode(text),
-                file_name=f"{stem}.txt", mime="text/plain",
+                "Download banner file (.job)", data=encode(text),
+                file_name=f"{stem}.job", mime="application/octet-stream",
             )
-        with d3:
+        with d2:
             xbuf = io.BytesIO()
             write_report(
                 points, text, CHECKS, stats,
@@ -2751,33 +2586,8 @@ with tabs[1]:
                 mime="application/vnd.openxmlformats-officedocument."
                      "spreadsheetml.sheet",
             )
-        with d2:
-            if job_template is not None:
-                try:
-                    job_bytes, job_note = splice(job_template, text)
-                    st.download_button(
-                        "Download updated job file (.job)", data=job_bytes,
-                        file_name=job_template.name,
-                        mime="application/octet-stream",
-                    )
-                    note("ok", job_note)
-                except ValueError as exc:
-                    note("error", f"Could not update that job file: {exc}")
-            else:
-                job_bytes, _ = standalone(text)
-                st.download_button(
-                    "Download banner-only job (.job)", data=job_bytes,
-                    file_name=f"{stem}.job", mime="application/octet-stream",
-                )
-
-        if job_template is None:
-            st.caption(
-                "No job file uploaded, so the .job holds the banner section "
-                "only - paste it into a job, or upload a .job above to have "
-                "it updated in place with the tables left untouched."
-            )
         st.caption(
-            "The .txt is the banner on its own. The workbook holds the same "
+            "The .job is the banner for WinCross. The workbook holds the same "
             "content as a column map plus the checks, for review."
         )
         st.code(text, language="text")
