@@ -353,8 +353,12 @@ def render(points, spaces_before=1, stub=1, justification=None, wrap=True):
     for p in points:
         p.pop("_tier", None)
 
-    # WinCross writes no blank between the heading tiers and the column
-    # labels, and closes the block with one full-width line of spaces.
+    # A full-width blank line separates the heading tiers from the column
+    # labels. It is spaces rather than an empty line, because every line in
+    # the block is positional and has to hold the full report width.
+    if depth:
+        lines.append(" " * (spaces_before * len(points)
+                            + sum(p["width"] for p in points) + stub))
 
     # Column tier: every column is its own span, so key on a unique index
     for i, p in enumerate(points):
@@ -376,9 +380,6 @@ def render(points, spaces_before=1, stub=1, justification=None, wrap=True):
 
     for p in points:
         p.pop("_col", None)
-
-    width = spaces_before * len(points) + sum(p["width"] for p in points) + stub
-    lines.append(" " * width)
     return lines
 
 
@@ -1909,6 +1910,9 @@ def splice(template, banner_text):
     return newline.join(out).encode(ENCODING, errors="replace"), note
 
 
+TAIL = ["[SIDEBYSIDE]", "[TITLE]", " ^TC"]
+
+
 def standalone(banner_text, newline="\r\n"):
     """A job fragment holding only the banner.
 
@@ -1916,7 +1920,7 @@ def standalone(banner_text, newline="\r\n"):
     the right thing to paste into an existing job, and it keeps the
     section markers so the boundaries are obvious.
     """
-    lines = ["[BANNERS]"] + banner_text.rstrip("\n").split("\n") + ["[SIDEBYSIDE]"]
+    lines = ["[BANNERS]"] + banner_text.rstrip("\n").split("\n") + TAIL
     data = newline.join(lines).encode(ENCODING, errors="replace")
     note = ("banner-only job: no tables or preferences in it, so paste the "
             "[BANNERS] section into a real job rather than running this")
@@ -2450,7 +2454,7 @@ header label sits one column left of the data it describes - and the numbers
 underneath stay correct, so nothing looks broken.
 """
 
-BUILD = "2026-10-05 / build 14 / validates grid conditions"
+BUILD = "2026-10-05 / build 15 / job tail + header spacing"
 
 st.title("WinCross Banner Generator")
 st.caption(
