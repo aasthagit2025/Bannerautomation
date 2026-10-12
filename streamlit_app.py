@@ -16,7 +16,8 @@ import warnings
 import openpyxl
 from openpyxl.utils import get_column_letter
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import (Alignment, Border, Font, PatternFill,
+                             Side)
 import streamlit as st
 
 
@@ -36,12 +37,7 @@ import streamlit as st
 # depends on cell styling, so nothing is lost.
 #
 
-import io
-import re
-import zipfile
-import warnings
 
-import openpyxl
 
 # Attributes seen in the wild that openpyxl's CellStyle does not accept
 BAD_ATTRS = re.compile(
@@ -404,7 +400,6 @@ def render(points, spaces_before=1, stub=1, justification=None, wrap=True):
 # plausible would put a wrong column into a deliverable.
 #
 
-import re
 
 # Bounds used when a comparison is open-ended. These are assumptions and are
 # always reported as such.
@@ -684,9 +679,7 @@ def parse_placeholders(text):
 # which handles sheets with and without the blank spacer row.
 #
 
-import re
 
-import openpyxl
 
 
 DEFAULT_WIDTH = 10
@@ -871,9 +864,7 @@ def parse_width_overrides(text):
 # through the translator and their status is carried on each point.
 #
 
-import re
 
-import openpyxl
 
 
 
@@ -889,7 +880,7 @@ HEADINGS = {
     "banner points": "label", "point": "label",
     "header": "group", "headers": "group",
     "condition": "condition", "logic": "condition", "definition": "condition",
-    "definitions": "condition", "base": "condition",
+    "definitions": "condition",
     "n": "n", "base": "n", "base size": "n",
 }
 
@@ -1055,7 +1046,6 @@ def summarise(report):
 # than logic is carried through so the translator can report it.
 #
 
-import re
 
 
 LOGIC_HINT = re.compile(r"[=<>]|\w\s*\([\d,\s\-]+\)|\b(AND|OR|NOT)\b", re.I)
@@ -1249,7 +1239,6 @@ def read_headerless(path_or_buffer, sheet=None, default_width=10,
 # that merely resembles a value label is a trap, not an answer.
 #
 
-import re
 from difflib import SequenceMatcher
 
 
@@ -1565,7 +1554,6 @@ def prepend_total(points, profile):
         if logic in ("TN", "TOTAL", "TOT") or label.startswith("total"):
             return points
 
-    first_group = (points[0].get("tiers") or [""])[0] if points else ""
     depth = max(1, len(points[0].get("tiers") or [""])) if points else 1
     heading = profile.get("total_group", "")
     total = {
@@ -1633,7 +1621,6 @@ def check_total_alignment(points):
 # wrong in the data.
 #
 
-import re
 
 # 'CP=Faisalabad, Gujranwala, Lahore, Sialkot'
 LISTED = re.compile(r"^\s*([^=]{1,40}?)\s*=\s*(.+)$", re.S)
@@ -1816,7 +1803,6 @@ def validate_sig(st, n_columns):
 # ====================================================================
 # Assemble a WinCross banner file from banner points.
 
-import re
 
 
 
@@ -2008,7 +1994,6 @@ def emit(points, settings=None):
 # running on its own. Which one was produced is always reported.
 #
 
-import re
 
 
 SECTION = re.compile(r"^\[[A-Z ]+\]\s*$")
@@ -2097,9 +2082,6 @@ def banner_section(template):
 # ====================================================================
 # template.py
 # ====================================================================
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
-
 #
 # Turn a layout-only banner sheet into a fill-in template.
 #
@@ -2115,7 +2097,6 @@ from openpyxl.styles import Alignment, Font, PatternFill
 # order frequently does not follow label order.
 #
 
-import re
 
 
 VARIABLE = re.compile(r"\(([A-Za-z]\w*)\)\s*$")
@@ -2288,10 +2269,6 @@ def apply_drafts(points, total_logic="TOTAL"):
 # ====================================================================
 # excel_report.py
 # ====================================================================
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
-
 #
 # Write the generated banner out as a workbook.
 #
@@ -2529,7 +2506,6 @@ def write_wincross_layout(points, path_or_buffer="banner_layout.xlsx",
 # as a grid, which is the older and simpler shape.
 #
 
-import openpyxl
 
 
 
@@ -2670,7 +2646,7 @@ header label sits one column left of the data it describes - and the numbers
 underneath stay correct, so nothing looks broken.
 """
 
-BUILD = "2026-10-05 / build 17 / significance testing"
+BUILD = "2026-10-05 / build 18 / sig testing, lint-clean"
 
 st.title("WinCross Banner Generator")
 st.caption(
@@ -2789,7 +2765,7 @@ with st.sidebar:
                             value=profile.get("options", "1,SB,HD,W200"))
     point_width = st.number_input("Banner point width (^W)", 1, 200,
                                   int(profile.get("point_width", 70)))
-    normalise = st.checkbox("Normalise logic spacing", value=True)
+    tidy_logic = st.checkbox("Normalise logic spacing", value=True)
 
 
 if not uploaded:
@@ -2927,6 +2903,16 @@ for n in check_total_alignment(points):
     note("error", n)
 
 # ---------------------------------------------------------------- generate
+if sig_mode == "Within each group":
+    stat_test = within_groups(points)
+elif sig_mode == "None":
+    stat_test = sig_none(points)
+else:
+    stat_test = sig_custom.strip() or profile.get("stat_test", "^  ,0")
+
+for problem in validate_sig(stat_test, len(points)):
+    note("warn", f"significance testing: {problem}")
+
 settings = {
     "banner_id": int(banner_id),
     "point_width": int(point_width),
@@ -2940,24 +2926,13 @@ settings = {
     "stat_test": stat_test,
     "options": options,
     "emit_header_block": emit_header,
-    "normalise_logic": normalise,
+    "normalise_logic": tidy_logic,
     "wrap_labels": wrap_labels,
     "justification": {"super": just, "group": just, "column": just},
 }
 
-if sig_mode == "Within each group":
-    stat_test = within_groups(points)
-elif sig_mode == "None":
-    stat_test = sig_none(points)
-else:
-    stat_test = sig_custom.strip() or profile.get("stat_test", "^  ,0")
-settings["stat_test"] = stat_test
-
-for problem in validate_sig(stat_test, len(points)):
-    note("warn", f"significance testing: {problem}")
-
-text, warnings, errors, stats = emit(points, settings)
-for w in warnings:
+text, gen_warnings, errors, stats = emit(points, settings)
+for w in gen_warnings:
     note("warn", w)
 for e in errors:
     note("error", e)
