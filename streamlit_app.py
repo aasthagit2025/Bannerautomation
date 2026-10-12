@@ -1697,6 +1697,121 @@ def expand_points(points, report=None):
 
 
 # ====================================================================
+# sig_testing.py
+# ====================================================================
+#
+# Build the significance-testing directive from the banner's structure.
+#
+# WinCross records which columns are tested against which in ST, as a
+# comma-separated list where a slash joins the members of one comparison
+# group:
+#
+#     ST:1,2/3,4/5,6/7,8,9,10,11,12,13,14,15,16,17/18,...
+#
+# Column 1 stands alone - a total is not tested against anything. 2/3 means
+# columns 2 and 3 are compared with each other, and so on. A column listed on
+# its own is in no comparison.
+#
+# The sensible default is to test within each heading group: the columns of
+# "Q2: Pack Vs. Stick buying" against each other, the age bands against each
+# other, and nothing across groups. Testing across groups produces letters
+# that mean nothing - "Faithful" against "58-60 years" is not a comparison
+# anyone asked for.
+#
+# The default is a starting point. Real banners often depart from it, so the
+# generated string is always editable, and a client's own ST can be pasted in
+# whole.
+#
+
+
+def groups_of(points):
+    """Runs of consecutive columns sharing a heading."""
+    runs, i = [], 0
+    while i < len(points):
+        key = (points[i].get("tiers") or [""])[0]
+        j = i
+        while (j + 1 < len(points)
+               and ((points[j + 1].get("tiers") or [""])[0] == key)):
+            j += 1
+        runs.append((key, [p["column"] for p in points[i:j + 1]]))
+        i = j + 1
+    return runs
+
+
+def within_groups(points, test_total=False, min_size=2):
+    """ST testing each group's columns against each other.
+
+    A total column is excluded by default: it contains everyone, so testing
+    a subgroup against it compares a set with a set it belongs to.
+    """
+    parts = []
+    for _, cols in groups_of(points):
+        members = [c for c in cols
+                   if test_total or not points[c - 1].get("is_total")]
+        if len(members) >= min_size:
+            parts.append("/".join(str(c) for c in members))
+            members = []
+        for c in cols:
+            if c not in [int(x) for part in parts for x in part.split("/")]:
+                parts.append(str(c))
+    # keep the columns in order, however the groups fell out
+    seen, ordered = set(), []
+    for part in sorted(parts, key=lambda s: int(s.split("/")[0])):
+        head = int(part.split("/")[0])
+        if head in seen:
+            continue
+        for x in part.split("/"):
+            seen.add(int(x))
+        ordered.append(part)
+    return ",".join(ordered)
+
+
+def sig_none(points):
+    """ST with every column standing alone - no testing."""
+    return ",".join(str(p["column"]) for p in points)
+
+
+def describe_sig(st, points):
+    """Explain an ST string in words, for checking."""
+    labels = {p["column"]: p["label"].replace("\n", " ").strip() for p in points}
+    out = []
+    for part in str(st).split(","):
+        part = part.strip()
+        if "/" not in part:
+            continue
+        try:
+            cols = [int(x) for x in part.split("/")]
+        except ValueError:
+            continue
+        out.append(f"{part}: " + " vs ".join(labels.get(c, f"col {c}") for c in cols))
+    return out
+
+
+def validate_sig(st, n_columns):
+    """Check an ST string covers every column exactly once."""
+    problems, seen = [], []
+    for part in str(st).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        for x in part.split("/"):
+            try:
+                seen.append(int(x))
+            except ValueError:
+                problems.append(f"{x!r} is not a column number")
+    dupes = sorted({c for c in seen if seen.count(c) > 1})
+    missing = [c for c in range(1, n_columns + 1) if c not in seen]
+    over = [c for c in seen if c > n_columns or c < 1]
+    if dupes:
+        problems.append(f"columns {dupes} appear in more than one comparison group")
+    if missing:
+        problems.append(f"columns {missing} are not listed at all")
+    if over:
+        problems.append(f"columns {sorted(set(over))} are outside the banner")
+    return problems
+
+
+# ====================================================================
 # generator.py
 # ====================================================================
 # Assemble a WinCross banner file from banner points.
@@ -2393,10 +2508,38 @@ def write_wincross_layout(points, path_or_buffer="banner_layout.xlsx",
 
 
 # ====================================================================
-# reader.py - format detection
+# reader.py
 # ====================================================================
+#
+# Detect which banner format a workbook uses and read it accordingly.
+#
+# Two shapes occur in practice, one per client:
+#
+#   grid  - the banner runs left to right, one spreadsheet column per banner
+#           column, with heading rows above the labels and a row of WinCross
+#           logic beneath. Read by excel_spec.
+#
+#   plan  - the banner runs top to bottom, one spreadsheet row per banner
+#           column, under named headings (Column, Variable, Group, Label,
+#           Response, Condition). Conditions are in plan syntax and need
+#           translating. One sheet may hold several banners. Read by
+#           plan_reader.
+#
+# Detection looks for the plan's heading row. Anything without one is treated
+# as a grid, which is the older and simpler shape.
+#
+
+import openpyxl
+
+
+
+
 def detect(path_or_buffer):
-    """Return 'plan', 'vertical' or 'grid'."""
+    """Return 'plan', 'vertical' or 'grid'.
+
+    'plan' has a Label/Response/Condition heading row. 'vertical' runs the
+    same way down the page without one. 'grid' runs left to right.
+    """
     wb = load(path_or_buffer)
     for name in wb.sheetnames:
         if looks_like_plan(wb[name]):
@@ -2409,10 +2552,28 @@ def detect(path_or_buffer):
 
 def read_any(path_or_buffer, default_width=10, width_overrides=None,
              lo=0, hi=9999, placeholders=None, total_logic=""):
-    """Read either banner format. Returns (banners, report, fmt)."""
+    """Read either format.
+
+    Returns (banners, report, fmt) where `banners` maps a banner name to its
+    list of points. A grid workbook yields a single banner; a plan workbook
+    yields one per table found. `report` is the translation report, empty
+    for grid workbooks since their logic is already WinCross syntax.
+    """
     fmt = detect(path_or_buffer)
+
     if hasattr(path_or_buffer, "seek"):
         path_or_buffer.seek(0)
+
+    if fmt == "plan":
+        banners, report = read_plan(
+            path_or_buffer, default_width=default_width, lo=lo, hi=hi,
+            placeholders=placeholders, total_logic=total_logic)
+        if width_overrides:
+            for points in banners.values():
+                for p in points:
+                    if p["column"] in width_overrides:
+                        p["width"] = int(width_overrides[p["column"]])
+        return banners, report, fmt
 
     if fmt == "vertical":
         banners, report = read_headerless(
@@ -2425,21 +2586,37 @@ def read_any(path_or_buffer, default_width=10, width_overrides=None,
                         p["width"] = int(width_overrides[p["column"]])
         return banners, report, fmt
 
-    if fmt == "plan":
-        banners, report = read_plan(path_or_buffer, default_width=default_width,
-                                    lo=lo, hi=hi, placeholders=placeholders,
-                                    total_logic=total_logic)
-        if width_overrides:
-            for points in banners.values():
-                for p in points:
-                    if p["column"] in width_overrides:
-                        p["width"] = int(width_overrides[p["column"]])
-        return banners, report, fmt
+    points, meta = read_points(
+        path_or_buffer, default_width=default_width,
+        width_overrides=width_overrides)
+    name = meta.get("sheet", "Banner")
 
-    points, meta = read_points(path_or_buffer, default_width=default_width,
-                               width_overrides=width_overrides)
-    return {meta.get("sheet", "Banner"): points}, [], fmt
+    # A grid sheet usually carries WinCross syntax already, but not always -
+    # some are written as prose. Putting every condition through the
+    # translator leaves real logic untouched and catches the rest, instead
+    # of writing a sentence into the banner file where logic belongs.
+    report = []
+    for p in points:
+        if not p.get("logic"):
+            continue
+        t = translate(p["logic"], lo=lo, hi=hi, placeholders=placeholders)
+        if t.status == "blocked":
+            report.append({
+                "banner": name, "column": p["column"], "label": p["label"],
+                "condition": t.source, "expression": "",
+                "status": "blocked", "note": t.note,
+            })
+            p["logic"] = ""
+        else:
+            if t.expr != p["logic"]:
+                report.append({
+                    "banner": name, "column": p["column"], "label": p["label"],
+                    "condition": t.source, "expression": t.expr,
+                    "status": t.status, "note": t.note,
+                })
+            p["logic"] = t.expr
 
+    return {name: points}, report, fmt
 
 
 # ====================================================================
@@ -2493,7 +2670,7 @@ header label sits one column left of the data it describes - and the numbers
 underneath stay correct, so nothing looks broken.
 """
 
-BUILD = "2026-10-05 / build 16 / drops descriptor column"
+BUILD = "2026-10-05 / build 17 / significance testing"
 
 st.title("WinCross Banner Generator")
 st.caption(
@@ -2592,8 +2769,19 @@ with st.sidebar:
     )
 
     st.subheader("Directives")
-    stat_test = st.text_input("Statistical testing (ST)",
-                              value=profile.get("stat_test", "^  ,0"))
+    sig_mode = st.selectbox(
+        "Significance testing", ["Within each group", "None", "Custom"],
+        help="Within each group tests a group's columns against each other "
+             "and nothing across groups. A total column is left out, since "
+             "testing a subgroup against the set it belongs to means little.",
+    )
+    sig_custom = ""
+    if sig_mode == "Custom":
+        sig_custom = st.text_area(
+            "ST string", value="", height=90,
+            help="Comma-separated, slash joins a comparison group: "
+                 "1,2/3,4/5. Paste a client's own ST here.",
+        )
     comparison = st.text_input("Comparison groups (CP)",
                                value=profile.get("comparison_groups", "0,0"))
     weights = st.text_input("Weights (WT)", value="")
@@ -2757,6 +2945,17 @@ settings = {
     "justification": {"super": just, "group": just, "column": just},
 }
 
+if sig_mode == "Within each group":
+    stat_test = within_groups(points)
+elif sig_mode == "None":
+    stat_test = sig_none(points)
+else:
+    stat_test = sig_custom.strip() or profile.get("stat_test", "^  ,0")
+settings["stat_test"] = stat_test
+
+for problem in validate_sig(stat_test, len(points)):
+    note("warn", f"significance testing: {problem}")
+
 text, warnings, errors, stats = emit(points, settings)
 for w in warnings:
     note("warn", w)
@@ -2779,6 +2978,7 @@ if cb_report:
     names.append("Codebook matches")
 if drafted:
     names.append("Drafted logic")
+names.append("Sig testing")
 tabs = st.tabs(names)
 
 with tabs[0]:
@@ -2920,3 +3120,20 @@ if drafted:
             mime="application/vnd.openxmlformats-officedocument."
                  "spreadsheetml.sheet",
         )
+
+
+with tabs[names.index("Sig testing")]:
+    st.caption(
+        "Which columns are tested against which. A slash joins one "
+        "comparison group; a column on its own is in no comparison."
+    )
+    st.code(stat_test, language="text")
+    pairs = describe_sig(stat_test, points)
+    if pairs:
+        st.dataframe(
+            [{"Group": p.split(":")[0], "Columns compared": p.split(": ", 1)[1]}
+             for p in pairs],
+            use_container_width=True, hide_index=True,
+        )
+    else:
+        st.info("No comparison groups - nothing is being tested.")
