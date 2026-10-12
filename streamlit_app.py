@@ -535,6 +535,10 @@ def translate(condition, var_hint="", lo=DEFAULT_MIN, hi=DEFAULT_MAX,
             "contains an unfilled placeholder - supply the cut point for this "
             "variable to generate this column")
 
+    # Bare keywords WinCross understands on their own
+    if text.upper() in ("TN", "TOTAL", "TOT"):
+        return Translation(raw, text.upper(), "ok")
+
     # Already in WinCross form, e.g. S8r5(1) or Q1 (1) AND Q2(3)
     if re.search(r"\w\s*\([\d,\s\-]+\)", text):
         return Translation(raw, " ".join(text.split()), "ok",
@@ -615,7 +619,26 @@ def translate(condition, var_hint="", lo=DEFAULT_MIN, hi=DEFAULT_MAX,
             f"variable {m.group(1)} is named but the condition is written as "
             f"prose - the codes are needed, e.g. {m.group(1)}(1) or {m.group(1)}=1")
 
-    return Translation(raw, "", "blocked", "condition syntax not recognised")
+    # A condition written as prose. Name the variables it mentions - that is
+    # the half of the answer the sentence does contain, and it tells whoever
+    # fixes the spec exactly which codes are needed.
+    seen, found = set(), []
+    for tok in re.findall(r"\b([A-Za-z][A-Za-z_]*\d+[A-Za-z_0-9]*)\b", text):
+        if tok.upper() in ("PC", "FC") or tok.lower() in seen:
+            continue
+        seen.add(tok.lower())
+        found.append(tok)
+    if found:
+        return Translation(
+            raw, "", "blocked",
+            f"written as a description rather than logic. It mentions "
+            f"{', '.join(found[:5])} - the codes for those are needed, "
+            f"e.g. {found[0]}(1)")
+
+    return Translation(
+        raw, "", "blocked",
+        "written as a description rather than logic, and no variable is "
+        "named in it - the variable and its codes are both needed")
 
 
 def translate_all(conditions, lo=DEFAULT_MIN, hi=DEFAULT_MAX, placeholders=None):
@@ -2427,7 +2450,7 @@ header label sits one column left of the data it describes - and the numbers
 underneath stay correct, so nothing looks broken.
 """
 
-BUILD = "2026-10-05 / build 13 / job file download"
+BUILD = "2026-10-05 / build 14 / validates grid conditions"
 
 st.title("WinCross Banner Generator")
 st.caption(
