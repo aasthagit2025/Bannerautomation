@@ -691,6 +691,15 @@ import openpyxl
 
 DEFAULT_WIDTH = 10
 
+# Words a sheet uses to label its own rows down the first column, rather
+# than to name a banner column
+DESCRIPTORS = {
+    "banner name", "banner break", "banner breaks", "banner point",
+    "banner points", "definition", "definitions", "label", "labels",
+    "logic", "condition", "conditions", "header", "headers", "group",
+    "groups", "response", "responses", "base", "variable", "column", "col",
+}
+
 
 class SheetError(Exception):
     pass
@@ -791,6 +800,26 @@ def read_points(path_or_buffer, sheet=None, default_width=DEFAULT_WIDTH,
         point["group"] = point["tiers"][1] if len(point["tiers"]) > 1 else ""
         points.append(point)
 
+    # Some sheets label their rows down the first column - "Banner Name",
+    # "Banner Break", "Definition". That column describes the grid rather
+    # than holding a banner point. It is recognised by those descriptor
+    # words, not by whether its logic parses: a real first column often
+    # holds a total whose definition is written in prose, and dropping that
+    # would silently lose a column.
+    meta_stub = ""
+    if len(points) > 1:
+        first = points[0]
+        words = {str(first.get("label", "")).strip().lower(),
+                 str(first.get("logic", "")).strip().lower()}
+        words |= {str(t).strip().lower() for t in (first.get("tiers") or [])}
+        if words & DESCRIPTORS:
+            meta_stub = first["label"] or first["logic"]
+            points = points[1:]
+            for i, p in enumerate(points, start=1):
+                p["column"] = i
+                if width_overrides and i in width_overrides:
+                    p["width"] = int(width_overrides[i])
+
     if not points:
         raise SheetError("no banner columns found - check the sheet layout")
 
@@ -800,6 +829,7 @@ def read_points(path_or_buffer, sheet=None, default_width=DEFAULT_WIDTH,
         "tiers": len(tier_rows),
         "columns": len(points),
         "layout_only": logic_row is None,
+        "stub_dropped": meta_stub,
     }
     return points, meta
 
@@ -1525,6 +1555,15 @@ def prepend_total(points, profile):
     """
     if not profile.get("prepend_total"):
         return points
+
+    # If the spec already opens with a total column there is nothing to add -
+    # prepending another would duplicate it and shift every stat letter.
+    if points:
+        first = points[0]
+        logic = str(first.get("logic", "")).strip().upper()
+        label = str(first.get("label", "")).strip().lower()
+        if logic in ("TN", "TOTAL", "TOT") or label.startswith("total"):
+            return points
 
     first_group = (points[0].get("tiers") or [""])[0] if points else ""
     depth = max(1, len(points[0].get("tiers") or [""])) if points else 1
@@ -2454,7 +2493,7 @@ header label sits one column left of the data it describes - and the numbers
 underneath stay correct, so nothing looks broken.
 """
 
-BUILD = "2026-10-05 / build 15 / job tail + header spacing"
+BUILD = "2026-10-05 / build 16 / drops descriptor column"
 
 st.title("WinCross Banner Generator")
 st.caption(
